@@ -7,7 +7,7 @@ const manifest: PaperclipPluginManifestV1 = {
   displayName: "Claude Token Usage",
   description:
     "Track Claude token usage per company, accumulate daily totals, and export a weekly CSV priced at configurable per-model rates.",
-  author: "Hlmsvrs",
+  author: "@herrhelms",
   categories: ["automation"],
   capabilities: [
     "events.subscribe",
