@@ -1,5 +1,5 @@
 {
-  "name": "paperclip-plugin-hlmsvrs-token-usage",
+  "name": "paperclip-plugin-claude-token-usage",
   "version": "0.1.0",
   "description": "Track Claude token usage per Paperclip company, store daily rollups, render a dashboard, and export a weekly CSV for token-based billing.",
   "private": true,

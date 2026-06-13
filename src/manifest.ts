@@ -1,10 +1,10 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 const manifest: PaperclipPluginManifestV1 = {
-  id: "hlmsvrs.token-usage",
+  id: "claude-token-usage",
   apiVersion: 1,
   version: "0.1.0",
-  displayName: "Hlmsvrs Token Usage",
+  displayName: "Claude Token Usage",
   description:
     "Track Claude token usage per company, accumulate daily totals, and export a weekly CSV priced at configurable per-model rates.",
   author: "Hlmsvrs",

@@ -277,7 +277,7 @@ let capturedCtx: PluginContext | null = null;
 const plugin = definePlugin({
   async setup(ctx: PluginContext) {
     capturedCtx = ctx;
-    ctx.logger.info("hlmsvrs-token-usage starting up", {
+    ctx.logger.info("claude-token-usage starting up", {
       namespace: ctx.db.namespace,
     });
 

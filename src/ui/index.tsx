@@ -54,12 +54,62 @@ function fmtUsd(n: number | null | undefined): string {
   return `$${n.toFixed(2)}`;
 }
 
+const THEME_CSS = `
+.tu-root {
+  --tu-fg: #111;
+  --tu-muted: #57606a;
+  --tu-border: #d0d7de;
+  --tu-border-soft: #eaecef;
+  --tu-card-bg: #fafbfc;
+  --tu-table-head-bg: #f6f8fa;
+  --tu-input-bg: #fff;
+  --tu-input-fg: #111;
+  --tu-accent: #0969da;
+  --tu-accent-fg: #fff;
+  --tu-btn-bg: #fff;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  .tu-root {
+    --tu-fg: #e6edf3;
+    --tu-muted: #8b949e;
+    --tu-border: #30363d;
+    --tu-border-soft: #21262d;
+    --tu-card-bg: #161b22;
+    --tu-table-head-bg: #161b22;
+    --tu-input-bg: #0d1117;
+    --tu-input-fg: #e6edf3;
+    --tu-accent: #2f81f7;
+    --tu-accent-fg: #fff;
+    --tu-btn-bg: #21262d;
+  }
+}
+:is(.dark, [data-theme="dark"], .theme-dark) .tu-root,
+.tu-root:is(.dark, [data-theme="dark"]) {
+  --tu-fg: #e6edf3;
+  --tu-muted: #8b949e;
+  --tu-border: #30363d;
+  --tu-border-soft: #21262d;
+  --tu-card-bg: #161b22;
+  --tu-table-head-bg: #161b22;
+  --tu-input-bg: #0d1117;
+  --tu-input-fg: #e6edf3;
+  --tu-accent: #2f81f7;
+  --tu-accent-fg: #fff;
+  --tu-btn-bg: #21262d;
+}
+.tu-root input[type="number"],
+.tu-root input[type="date"] {
+  color-scheme: light dark;
+}
+`;
+
 const styles = {
   page: {
     padding: "24px",
     fontFamily:
       "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-    color: "#111",
+    color: "var(--tu-fg)",
     maxWidth: 1100,
     margin: "0 auto",
   } as React.CSSProperties,
@@ -71,7 +121,7 @@ const styles = {
     flexWrap: "wrap" as const,
     gap: 12,
   },
-  title: { fontSize: 22, fontWeight: 600, margin: 0 },
+  title: { fontSize: 22, fontWeight: 600, margin: 0, color: "var(--tu-fg)" },
   controls: {
     display: "flex",
     gap: 8,
@@ -80,25 +130,27 @@ const styles = {
   },
   input: {
     padding: "6px 10px",
-    border: "1px solid #d0d7de",
+    border: "1px solid var(--tu-border)",
     borderRadius: 6,
     fontSize: 13,
-    background: "#fff",
+    background: "var(--tu-input-bg)",
+    color: "var(--tu-input-fg)",
   } as React.CSSProperties,
   btn: {
     padding: "6px 12px",
-    border: "1px solid #d0d7de",
+    border: "1px solid var(--tu-border)",
     borderRadius: 6,
-    background: "#fff",
+    background: "var(--tu-btn-bg)",
+    color: "var(--tu-fg)",
     cursor: "pointer",
     fontSize: 13,
   } as React.CSSProperties,
   btnPrimary: {
     padding: "6px 12px",
-    border: "1px solid #0969da",
+    border: "1px solid var(--tu-accent)",
     borderRadius: 6,
-    background: "#0969da",
-    color: "#fff",
+    background: "var(--tu-accent)",
+    color: "var(--tu-accent-fg)",
     cursor: "pointer",
     fontSize: 13,
   } as React.CSSProperties,
@@ -109,48 +161,58 @@ const styles = {
     margin: "20px 0",
   } as React.CSSProperties,
   kpi: {
-    border: "1px solid #e1e4e8",
+    border: "1px solid var(--tu-border)",
     borderRadius: 8,
     padding: 16,
-    background: "#fafbfc",
+    background: "var(--tu-card-bg)",
+    color: "var(--tu-fg)",
   } as React.CSSProperties,
   kpiLabel: {
     fontSize: 12,
-    color: "#57606a",
+    color: "var(--tu-muted)",
     textTransform: "uppercase" as const,
     letterSpacing: 0.5,
   },
-  kpiValue: { fontSize: 24, fontWeight: 600, marginTop: 4 },
+  kpiValue: { fontSize: 24, fontWeight: 600, marginTop: 4, color: "var(--tu-fg)" },
   sectionTitle: {
     fontSize: 16,
     fontWeight: 600,
     margin: "24px 0 8px",
+    color: "var(--tu-fg)",
   },
   table: {
     width: "100%",
     borderCollapse: "collapse" as const,
     fontSize: 13,
+    color: "var(--tu-fg)",
   },
   th: {
     textAlign: "left" as const,
     padding: "8px 10px",
-    borderBottom: "2px solid #d0d7de",
-    background: "#f6f8fa",
+    borderBottom: "2px solid var(--tu-border)",
+    background: "var(--tu-table-head-bg)",
+    color: "var(--tu-fg)",
     fontWeight: 600,
   },
   td: {
     padding: "8px 10px",
-    borderBottom: "1px solid #eaecef",
+    borderBottom: "1px solid var(--tu-border-soft)",
+    color: "var(--tu-fg)",
   },
   empty: {
     padding: 24,
     textAlign: "center" as const,
-    color: "#57606a",
-    border: "1px dashed #d0d7de",
+    color: "var(--tu-muted)",
+    border: "1px dashed var(--tu-border)",
     borderRadius: 8,
   },
-  link: { color: "#0969da", textDecoration: "none", fontSize: 13 },
+  link: { color: "var(--tu-accent)", textDecoration: "none", fontSize: 13 },
+  mutedLabel: { fontSize: 12, color: "var(--tu-muted)" },
 };
+
+function ThemeStyles(): JSX.Element {
+  return <style>{THEME_CSS}</style>;
+}
 
 export function UsagePage(): JSX.Element {
   const host = useHostContext();
@@ -198,7 +260,7 @@ export function UsagePage(): JSX.Element {
   const hasPricing = !!pricing.data;
 
   const downloadCsv = useCallback(() => {
-    const url = `/api/plugins/hlmsvrs-token-usage/api/export/weekly.csv?companyId=${encodeURIComponent(
+    const url = `/api/plugins/claude-token-usage/api/export/weekly.csv?companyId=${encodeURIComponent(
       companyId,
     )}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
     window.open(url, "_blank");
@@ -206,7 +268,7 @@ export function UsagePage(): JSX.Element {
 
   if (!companyId) {
     return (
-      <div style={styles.page}>
+      <div className="tu-root" style={styles.page}><ThemeStyles />
         <div style={styles.empty}>
           No company context available. Open this plugin from within a
           Paperclip company.
@@ -216,18 +278,18 @@ export function UsagePage(): JSX.Element {
   }
 
   return (
-    <div style={styles.page}>
+    <div className="tu-root" style={styles.page}><ThemeStyles />
       <div style={styles.header}>
         <h1 style={styles.title}>Token Usage</h1>
         <div style={styles.controls}>
-          <label style={{ fontSize: 12, color: "#57606a" }}>From</label>
+          <label style={styles.mutedLabel}>From</label>
           <input
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
             style={styles.input}
           />
-          <label style={{ fontSize: 12, color: "#57606a" }}>To</label>
+          <label style={styles.mutedLabel}>To</label>
           <input
             type="date"
             value={to}
@@ -384,7 +446,7 @@ export function SettingsPage(): JSX.Element {
 
   if (!companyId) {
     return (
-      <div style={styles.page}>
+      <div className="tu-root" style={styles.page}><ThemeStyles />
         <div style={styles.empty}>No company context available.</div>
       </div>
     );
@@ -397,9 +459,9 @@ export function SettingsPage(): JSX.Element {
   ];
 
   return (
-    <div style={styles.page}>
+    <div className="tu-root" style={styles.page}><ThemeStyles />
       <h1 style={styles.title}>Token Usage Settings</h1>
-      <p style={{ color: "#57606a", fontSize: 13 }}>
+      <p style={{ color: "var(--tu-muted)", fontSize: 13 }}>
         Rates are in USD per 1M tokens. Defaults match current public
         Anthropic API list prices; edit before saving if they have shifted.
       </p>
@@ -446,7 +508,7 @@ export function SettingsPage(): JSX.Element {
       </table>
 
       <div style={{ marginTop: 20, display: "flex", gap: 12, alignItems: "center" }}>
-        <label style={{ fontSize: 13 }}>Margin %</label>
+        <label style={{ fontSize: 13, color: "var(--tu-fg)" }}>Margin %</label>
         <input
           type="number"
           step="0.1"

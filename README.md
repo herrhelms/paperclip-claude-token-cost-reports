@@ -1,4 +1,4 @@
-# Hlmsvrs Token Usage
+# Claude Token Usage
 
 Track Claude token usage per Paperclip company, accumulate a daily record, review it in a dashboard, and export a weekly CSV you can use to bill clients at a configurable token-based rate.
 
@@ -50,7 +50,7 @@ Called by the UI via `usePluginAction` / `usePluginData`:
 
 ## API routes
 
-Mounted under `/api/plugins/hlmsvrs-token-usage/api/*`:
+Mounted under `/api/plugins/claude-token-usage/api/*`:
 
 - `GET /export/weekly.csv?companyId=...&from=...&to=...` — streams the weekly billing CSV. Cost columns are blank when no pricing is saved for the company.
 

@@ -159,7 +159,7 @@ describe("manifest", () => {
   });
 
   it("uses the expected slug", () => {
-    expect(manifest.id ?? manifest.slug).toMatch(/hlmsvrs-token-usage/);
+    expect(manifest.id ?? manifest.slug).toMatch(/claude-token-usage/);
   });
 
   it("declares the page slot with routePath /usage", () => {
