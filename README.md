@@ -1,6 +1,6 @@
 # Claude Token Usage
 
-Track Claude token usage per Paperclip company, accumulate a daily record, review it in a dashboard, and export a weekly CSV you can use to bill clients at a configurable token-based rate.
+Track Claude token usage per Paperclip company, accumulate a daily record, review it in a dashboard, and export a monthly CSV you can use to bill clients at a configurable token-based rate.
 
 Designed for operators on a Claude Max 20x Pro plan who want to translate flat-rate consumption into a token-priced invoice.
 
@@ -8,9 +8,9 @@ Designed for operators on a Claude Max 20x Pro plan who want to translate flat-r
 
 - Subscribes to `cost_event.created` and `agent.run.finished` and writes one row per event into a private `usage_events` table (idempotent on `source_event_id`).
 - Runs a `*/15 * * * *` rollup job that recomputes `usage_daily` for each company.
-- Exposes a `Token Usage` page per company with date-range KPIs, a daily table, and an ISO-week rollup table.
+- Exposes a `Token Usage` page per company with date-range KPIs, a daily table, and a calendar-month rollup table.
 - Exposes a `Token Usage Settings` page where you configure `$/1M input` and `$/1M output` rates per model (Opus, Sonnet, Haiku) plus a global margin %.
-- Exposes a scoped JSON route that streams a weekly billing CSV: `week_start, week_end, input_tokens, output_tokens, input_cost_usd, output_cost_usd, total_billed_usd`.
+- Exposes a scoped JSON route that streams a monthly billing CSV: `month, month_start, month_end, input_tokens, output_tokens, input_cost_usd, output_cost_usd, total_billed_usd`.
 
 ## Surface
 
@@ -45,14 +45,14 @@ Migrations live in `migrations/001_init.sql`.
 Called by the UI via `usePluginAction` / `usePluginData`:
 
 - `getDailyUsage({ companyId, from, to })` — daily rows for the dashboard table.
-- `getWeeklySummary({ companyId, from, to })` — ISO-week rollups, with `$` columns when pricing is set.
+- `getMonthlySummary({ companyId, from, to })` — calendar-month rollups, with `$` columns when pricing is set.
 - `getPricing({ companyId })` / `setPricing({ companyId, config })` — used by the settings page.
 
 ## API routes
 
 Mounted under `/api/plugins/claude-token-usage/api/*`:
 
-- `GET /export/weekly.csv?companyId=...&from=...&to=...` — streams the weekly billing CSV. Cost columns are blank when no pricing is saved for the company.
+- `GET /export/monthly.csv?companyId=...&from=...&to=...` — streams the monthly billing CSV. Cost columns are blank when no pricing is saved for the company.
 
 ## Configuration
 
@@ -80,7 +80,7 @@ output_cost = o / 1_000_000 * pricing[m].output
 billed      = (input_cost + output_cost) * (1 + margin.percent / 100)
 ```
 
-The weekly CSV sums these per ISO week. If a company has no `pricing_config` row, cost and billed columns are emitted blank — token columns still populate so you can review usage before pricing it.
+The monthly CSV sums these per calendar month (YYYY-MM, UTC). If a company has no saved pricing config, cost and billed columns are emitted blank — token columns still populate so you can review usage before pricing it.
 
 ## Install target
 

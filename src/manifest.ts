@@ -3,10 +3,10 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "claude-token-usage",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.4.0",
   displayName: "Claude Token Usage",
   description:
-    "Track Claude token usage per company, accumulate daily totals, and export a weekly CSV priced at configurable per-model rates.",
+    "Track Claude token usage per company, accumulate daily totals, and export a monthly CSV priced at configurable per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M context variants). The dashboard is mounted at the host's company-scoped plugin page (open from the company sidebar) and per-company pricing is configured here in the plugin settings.",
   author: "@herrhelms",
   categories: ["automation"],
   capabilities: [
@@ -19,6 +19,13 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.write",
     "jobs.schedule",
     "instance.settings.register",
+    // costs.read gates delivery of `cost_event.created` to the worker.
+    // Without it, ctx.events.on("cost_event.created", ...) silently never fires.
+    "costs.read",
+    // agents.read lets us enrich per-model breakdown with agent attribution
+    // (which agent burned which tokens) — required for future per-agent rollups
+    // and already useful in logs.
+    "agents.read",
   ],
   entrypoints: {
     worker: "dist/worker.js",
@@ -38,9 +45,9 @@ const manifest: PaperclipPluginManifestV1 = {
   ],
   apiRoutes: [
     {
-      routeKey: "export-weekly-csv",
+      routeKey: "export-monthly-csv",
       method: "GET",
-      path: "/export/weekly.csv",
+      path: "/export/monthly.csv",
       auth: "board",
       capability: "api.routes.register",
       companyResolution: { from: "query", key: "companyId" },
@@ -53,7 +60,12 @@ const manifest: PaperclipPluginManifestV1 = {
         id: "usage-page",
         displayName: "Token Usage",
         exportName: "UsagePage",
-        routePath: "usage",
+        // Host validation: routePath must be a single lowercase slug — letters,
+        // numbers, hyphens; no slashes. The host mounts this at the company-scoped
+        // path it owns; we don't get to insert intermediate path segments.
+        // "tokens" reads cleaner than "usage" since the host's prefix already
+        // contains the plugin key: /$COMPANY/plugins/claude-token-usage/tokens.
+        routePath: "tokens",
       },
       {
         type: "settingsPage",
