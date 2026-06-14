@@ -27,7 +27,7 @@ type ModelKey = "opus" | "sonnet" | "haiku";
 
 type PricingConfig = {
   pricing: Record<ModelKey, { input: number; output: number }>;
-  marginPercent: number;
+  margin: { percent: number };
 };
 
 const DEFAULT_PRICING: PricingConfig = {
@@ -36,8 +36,30 @@ const DEFAULT_PRICING: PricingConfig = {
     sonnet: { input: 3, output: 15 },
     haiku: { input: 0.8, output: 4 },
   },
-  marginPercent: 0,
+  margin: { percent: 0 },
 };
+
+function normalizePricing(raw: unknown): PricingConfig | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const p = r.pricing as Record<string, unknown> | undefined;
+  if (!p) return null;
+  const out: PricingConfig = JSON.parse(JSON.stringify(DEFAULT_PRICING));
+  for (const k of ["opus", "sonnet", "haiku"] as const) {
+    const row = p[k] as { input?: unknown; output?: unknown } | undefined;
+    if (row && typeof row.input === "number" && typeof row.output === "number") {
+      out.pricing[k] = { input: row.input, output: row.output };
+    }
+  }
+  const m = r.margin as { percent?: unknown } | undefined;
+  if (m && typeof m.percent === "number") {
+    out.margin.percent = m.percent;
+  } else if (typeof (r as { marginPercent?: unknown }).marginPercent === "number") {
+    // tolerate old flat shape if any was persisted
+    out.margin.percent = (r as { marginPercent: number }).marginPercent;
+  }
+  return out;
+}
 
 function isoDateOffset(daysAgo: number): string {
   const d = new Date();
@@ -411,9 +433,8 @@ export function SettingsPage(): JSX.Element {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (pricing.data) {
-      setConfig(pricing.data);
-    }
+    const normalized = normalizePricing(pricing.data);
+    if (normalized) setConfig(normalized);
   }, [pricing.data]);
 
   const updateRate = (
@@ -513,11 +534,11 @@ export function SettingsPage(): JSX.Element {
           type="number"
           step="0.1"
           min="0"
-          value={config.marginPercent}
+          value={config.margin.percent}
           onChange={(e) =>
             setConfig((c) => ({
               ...c,
-              marginPercent: Number(e.target.value) || 0,
+              margin: { percent: Number(e.target.value) || 0 },
             }))
           }
           style={{ ...styles.input, width: 120 }}

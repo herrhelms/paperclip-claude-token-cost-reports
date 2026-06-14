@@ -71,17 +71,30 @@ function q(ctx: PluginContext, table: string): string {
   return `${ctx.db.namespace}.${table}`;
 }
 
-async function loadPricing(ctx: PluginContext, companyId: string): Promise<PricingConfig | null> {
-  const rows = await ctx.db.query<{ json: string }>(
-    `SELECT json FROM ${q(ctx, "pricing_config")} WHERE company_id = $1`,
-    [companyId],
-  );
-  if (!rows.length) return null;
-  try {
-    return JSON.parse(rows[0].json) as PricingConfig;
-  } catch {
-    return null;
+function pricingScope(companyId: string) {
+  return {
+    scopeKind: "company" as const,
+    scopeId: companyId,
+    stateKey: "pricing-config",
+  };
+}
+
+function isPricingConfig(v: unknown): v is PricingConfig {
+  if (!v || typeof v !== "object") return false;
+  const c = v as Record<string, unknown>;
+  const p = c.pricing as Record<string, unknown> | undefined;
+  if (!p || typeof p !== "object") return false;
+  for (const k of ["opus", "sonnet", "haiku"] as const) {
+    const r = p[k] as Record<string, unknown> | undefined;
+    if (!r || typeof r.input !== "number" || typeof r.output !== "number") return false;
   }
+  const margin = c.margin as Record<string, unknown> | undefined;
+  return !!margin && typeof margin.percent === "number";
+}
+
+async function loadPricing(ctx: PluginContext, companyId: string): Promise<PricingConfig | null> {
+  const raw = await ctx.state.get(pricingScope(companyId));
+  return isPricingConfig(raw) ? raw : null;
 }
 
 function priceFor(
@@ -127,25 +140,57 @@ async function rollupCompanyDay(ctx: PluginContext, companyId: string, day: stri
 }
 
 async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void> {
+  const e = event as unknown as Record<string, unknown>;
   const payload = (event.payload ?? {}) as Record<string, unknown>;
-  const sourceEventId = String((event as unknown as { id?: string }).id ?? payload.id ?? "");
-  if (!sourceEventId) return;
 
-  const companyId =
-    (payload.companyId as string) ?? (payload.company_id as string) ?? "";
+  const sourceEventId = String(
+    e.eventId ?? (e as { id?: string }).id ?? payload.eventId ?? payload.id ?? "",
+  );
+  const companyId = String(e.companyId ?? payload.companyId ?? payload.company_id ?? "");
+  const occurredAt = String(
+    e.occurredAt ??
+      payload.occurredAt ??
+      payload.occurred_at ??
+      new Date().toISOString(),
+  );
   const agentId =
-    (payload.agentId as string) ?? (payload.agent_id as string) ?? null;
+    (payload.agentId as string | undefined) ??
+    (payload.agent_id as string | undefined) ??
+    (e.actorType === "agent" ? ((e.actorId as string) ?? null) : null);
   const model = payload.model;
   const inputTokens = Number(payload.inputTokens ?? payload.input_tokens ?? 0);
   const outputTokens = Number(payload.outputTokens ?? payload.output_tokens ?? 0);
-  const occurredAt = String(
-    payload.occurredAt ?? payload.occurred_at ?? new Date(0).toISOString(),
+  const cachedInputTokens = Number(
+    payload.cachedInputTokens ?? payload.cached_input_tokens ?? 0,
   );
 
-  if (!companyId || (!inputTokens && !outputTokens)) {
-    // Nothing useful to record; skip silently.
+  // Always log so the operator can see what's arriving and diagnose silently-dropped events.
+  ctx.logger.info("usage event received", {
+    eventType: e.eventType ?? event.eventType,
+    sourceEventId,
+    companyId,
+    agentId,
+    model,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    occurredAt,
+    payloadKeys: Object.keys(payload),
+  });
+
+  if (!sourceEventId || !companyId) {
+    ctx.logger.warn("usage event skipped: missing id or company", {
+      sourceEventId,
+      companyId,
+    });
     return;
   }
+  if (!inputTokens && !outputTokens && !cachedInputTokens) {
+    // Zero-token events do exist (manual credits, refunds, etc.) — record nothing.
+    return;
+  }
+
+  const totalInput = inputTokens + cachedInputTokens;
 
   await ctx.db.execute(
     `INSERT INTO ${q(ctx, "usage_events")}
@@ -157,7 +202,7 @@ async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void
       companyId,
       agentId,
       normalizeModel(model),
-      inputTokens || 0,
+      totalInput,
       outputTokens || 0,
       occurredAt,
       toDay(occurredAt),
@@ -367,22 +412,19 @@ const plugin = definePlugin({
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
       const existing = await loadPricing(ctx, companyId);
-      return {
-        config: existing ?? DEFAULT_PRICING,
-        seeded: !existing,
-      };
+      // Return the bare PricingConfig — never wrap; UI binds to .pricing/.margin directly.
+      return existing ?? DEFAULT_PRICING;
     });
 
     ctx.actions.register("setPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
       const config = params.config as PricingConfig | undefined;
       if (!companyId || !config) throw new Error("companyId and config are required");
-      const json = JSON.stringify(config);
-      await ctx.db.execute(
-        `INSERT INTO ${q(ctx, "pricing_config")} (company_id, json) VALUES ($1, $2)
-         ON CONFLICT (company_id) DO UPDATE SET json = EXCLUDED.json`,
-        [companyId, json],
-      );
+      if (!isPricingConfig(config)) {
+        throw new Error("config does not match the PricingConfig shape");
+      }
+      await ctx.state.set(pricingScope(companyId), config);
+      ctx.logger.info("pricing saved", { companyId });
       return { ok: true };
     });
   },
