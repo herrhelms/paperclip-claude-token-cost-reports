@@ -184,6 +184,229 @@ async function loadPricing(ctx: PluginContext, companyId: string): Promise<Prici
   return upgradePricingConfig(raw);
 }
 
+// ---- Currency + FX -------------------------------------------------------
+//
+// All token pricing happens in USD (per-1M rates seeded from Anthropic's list
+// prices). The operator picks a *billing* currency per-company; the dashboard
+// converts USD -> billing currency at the per-day FX rate that was recorded
+// when the agents actually ran. Margin is added LAST so the displayed Price
+// is what the client is invoiced.
+//
+// Storage layout:
+//   ctx.state company-scoped key "currency-config" -> { currency: "USD" | ... }
+//   ctx.state instance-scoped key "active-currencies" -> string[] (union)
+//   plugin namespace fx_rates(day, currency, rate, source, fetched_at)
+//
+// The instance-scoped active-currencies set drives the daily fetch job: it
+// only fetches rates for currencies that at least one company is actually
+// using, so empty-config companies don't trigger network calls.
+
+const SUPPORTED_CURRENCIES = [
+  "USD",
+  "EUR",
+  "GBP",
+  "CHF",
+  "CAD",
+  "AUD",
+  "JPY",
+  "DKK",
+  "SEK",
+  "NOK",
+] as const;
+type CurrencyCode = (typeof SUPPORTED_CURRENCIES)[number];
+
+interface CurrencyConfig {
+  currency: CurrencyCode;
+}
+
+const DEFAULT_CURRENCY: CurrencyConfig = { currency: "USD" };
+
+// open.er-api.com: free, no API key, daily-updated USD-base rates.
+const FX_PROVIDER_NAME = "open.er-api.com";
+const FX_PROVIDER_URL = "https://open.er-api.com/v6/latest/USD";
+
+function isCurrencyCode(v: unknown): v is CurrencyCode {
+  return (
+    typeof v === "string" &&
+    (SUPPORTED_CURRENCIES as readonly string[]).includes(v)
+  );
+}
+
+function currencyScope(companyId: string) {
+  return {
+    scopeKind: "company" as const,
+    scopeId: companyId,
+    stateKey: "currency-config",
+  };
+}
+
+const ACTIVE_CURRENCIES_SCOPE = {
+  scopeKind: "instance" as const,
+  stateKey: "active-currencies",
+};
+
+async function loadCurrency(
+  ctx: PluginContext,
+  companyId: string,
+): Promise<CurrencyConfig> {
+  const raw = await ctx.state.get(currencyScope(companyId));
+  if (raw && typeof raw === "object") {
+    const c = (raw as { currency?: unknown }).currency;
+    if (isCurrencyCode(c)) return { currency: c };
+  }
+  return DEFAULT_CURRENCY;
+}
+
+async function loadActiveCurrencies(ctx: PluginContext): Promise<Set<CurrencyCode>> {
+  const raw = await ctx.state.get(ACTIVE_CURRENCIES_SCOPE);
+  const out = new Set<CurrencyCode>();
+  if (Array.isArray(raw)) {
+    for (const v of raw) if (isCurrencyCode(v)) out.add(v);
+  }
+  return out;
+}
+
+async function noteActiveCurrency(
+  ctx: PluginContext,
+  currency: CurrencyCode,
+): Promise<void> {
+  const set = await loadActiveCurrencies(ctx);
+  if (set.has(currency)) return;
+  set.add(currency);
+  await ctx.state.set(ACTIVE_CURRENCIES_SCOPE, Array.from(set));
+}
+
+async function upsertFxRate(
+  ctx: PluginContext,
+  day: string,
+  currency: CurrencyCode,
+  rate: number,
+  source: string,
+): Promise<void> {
+  await ctx.db.execute(
+    `INSERT INTO ${q(ctx, "fx_rates")} (day, currency, rate, source, fetched_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (day, currency) DO UPDATE SET rate = EXCLUDED.rate, source = EXCLUDED.source, fetched_at = now()`,
+    [day, currency, rate, source],
+  );
+}
+
+// Look up a stored rate. Prefers an exact day match; falls back to the most
+// recent rate stored before `day` so dashboards aren't blank when today's
+// fetch hasn't landed yet (or a historical row is missing).
+async function getFxRate(
+  ctx: PluginContext,
+  day: string,
+  currency: CurrencyCode,
+): Promise<{ rate: number; day: string; source: string } | null> {
+  if (currency === "USD") {
+    return { rate: 1, day, source: "identity" };
+  }
+  const exact = await ctx.db.query<{ rate: string; source: string }>(
+    `SELECT rate::text AS rate, source
+       FROM ${q(ctx, "fx_rates")}
+      WHERE day = $1 AND currency = $2
+      LIMIT 1`,
+    [day, currency],
+  );
+  if (exact.length > 0) {
+    return { rate: Number(exact[0].rate), day, source: exact[0].source };
+  }
+  const recent = await ctx.db.query<{ day: string; rate: string; source: string }>(
+    `SELECT day, rate::text AS rate, source
+       FROM ${q(ctx, "fx_rates")}
+      WHERE currency = $1 AND day <= $2
+      ORDER BY day DESC
+      LIMIT 1`,
+    [currency, day],
+  );
+  if (recent.length > 0) {
+    return {
+      rate: Number(recent[0].rate),
+      day: recent[0].day,
+      source: recent[0].source,
+    };
+  }
+  return null;
+}
+
+// Fetch latest USD-base rates from open.er-api.com and return the slice for
+// the supported currencies. Throws on transport / parse failure so the daily
+// job records a clean failure rather than persisting silently.
+async function fetchFxFromProvider(
+  ctx: PluginContext,
+): Promise<{ day: string; rates: Partial<Record<CurrencyCode, number>>; source: string }> {
+  const res = await ctx.http.fetch(FX_PROVIDER_URL, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`FX provider HTTP ${res.status} ${res.statusText}`);
+  const body = (await res.json()) as {
+    result?: string;
+    base_code?: string;
+    time_last_update_utc?: string;
+    rates?: Record<string, number>;
+  };
+  if (body.result !== "success" || !body.rates) {
+    throw new Error(`FX provider returned an unexpected response: ${JSON.stringify(body).slice(0, 200)}`);
+  }
+  // Use the provider's effective date if present; otherwise today (UTC).
+  // The provider's day boundary is UTC.
+  let day = fmtDay(new Date());
+  if (body.time_last_update_utc) {
+    const t = Date.parse(body.time_last_update_utc);
+    if (!Number.isNaN(t)) day = new Date(t).toISOString().slice(0, 10);
+  }
+  const rates: Partial<Record<CurrencyCode, number>> = {};
+  for (const c of SUPPORTED_CURRENCIES) {
+    const r = body.rates[c];
+    if (typeof r === "number" && r > 0 && Number.isFinite(r)) {
+      rates[c] = r;
+    }
+  }
+  return { day, rates, source: FX_PROVIDER_NAME };
+}
+
+// Ensure today's row is present for every active currency. Idempotent — re-
+// runs every hour but only writes when the row is actually missing or stale.
+async function ensureTodaysFxRates(ctx: PluginContext): Promise<{
+  fetched: boolean;
+  day: string;
+  written: CurrencyCode[];
+  skipped: CurrencyCode[];
+}> {
+  const active = await loadActiveCurrencies(ctx);
+  active.delete("USD"); // USD is identity; nothing to store.
+  if (active.size === 0) {
+    return { fetched: false, day: fmtDay(new Date()), written: [], skipped: [] };
+  }
+  // Already have today's row for every active currency? Skip the network.
+  const today = fmtDay(new Date());
+  const existingRows = await ctx.db.query<{ currency: string }>(
+    `SELECT currency FROM ${q(ctx, "fx_rates")} WHERE day = $1`,
+    [today],
+  );
+  const present = new Set(existingRows.map((r) => r.currency));
+  const missing = Array.from(active).filter((c) => !present.has(c));
+  if (missing.length === 0) {
+    return { fetched: false, day: today, written: [], skipped: Array.from(active) };
+  }
+  // Fetch once, persist the rates we need.
+  const { day, rates, source } = await fetchFxFromProvider(ctx);
+  const written: CurrencyCode[] = [];
+  const skipped: CurrencyCode[] = [];
+  for (const c of active) {
+    const r = rates[c];
+    if (typeof r === "number" && r > 0) {
+      await upsertFxRate(ctx, day, c, r, source);
+      written.push(c);
+    } else {
+      skipped.push(c);
+    }
+  }
+  return { fetched: true, day, written, skipped };
+}
+
 function priceFor(
   model: ModelKey,
   input: number,
@@ -820,6 +1043,26 @@ const plugin = definePlugin({
       }
     });
 
+    // Daily FX fetcher. Runs hourly (7 past) but is a no-op when today's row
+    // already exists for every active currency. Catching errors here is
+    // important — the host doesn't retry plugin jobs, and a stale FX row is
+    // less bad than a worker that hard-fails on every wake.
+    ctx.jobs.register("fetch-fx-daily", async (job) => {
+      try {
+        const result = await ensureTodaysFxRates(ctx);
+        ctx.logger.info("fetch-fx-daily run", {
+          runId: job.runId,
+          trigger: job.trigger,
+          ...result,
+        });
+      } catch (err) {
+        ctx.logger.warn("fetch-fx-daily failed", {
+          runId: job.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
     // Read-only fetchers used by the UI's usePluginData(...) hooks live on
     // ctx.data.register, NOT ctx.actions.register. The host wires data and
     // actions through separate registries; usePluginData calls into the data
@@ -833,20 +1076,23 @@ const plugin = definePlugin({
       if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
 
       const pricing = await loadPricing(ctx, companyId);
+      const currencyCfg = await loadCurrency(ctx, companyId);
+      const fx = await getFxRate(ctx, to, currencyCfg.currency);
+      const fxRate = fx?.rate ?? 1;
+      const margin = pricing ? (pricing.margin.percent || 0) / 100 : 0;
       const rows = await readDaily(ctx, companyId, from, to);
 
       const byDay = new Map<string, {
         day: string;
         input_tokens: number;
         output_tokens: number;
-        billable_usd: number;
+        cost_usd: number;
       }>();
-      const marginMultiplier = pricing ? 1 + (pricing.margin.percent || 0) / 100 : 1;
 
       for (const r of rows) {
         let bucket = byDay.get(r.day);
         if (!bucket) {
-          bucket = { day: r.day, input_tokens: 0, output_tokens: 0, billable_usd: 0 };
+          bucket = { day: r.day, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
           byDay.set(r.day, bucket);
         }
         bucket.input_tokens += Number(r.input_tokens) || 0;
@@ -858,20 +1104,46 @@ const plugin = definePlugin({
             Number(r.output_tokens) || 0,
             pricing,
           );
-          bucket.billable_usd += (inputCost + outputCost) * marginMultiplier;
+          bucket.cost_usd += inputCost + outputCost;
         }
       }
 
       return {
         priced: !!pricing,
+        currency: currencyCfg.currency,
+        fxRate,
+        fxDay: fx?.day ?? null,
+        fxSource: fx?.source ?? null,
+        marginPercent: pricing?.margin.percent ?? 0,
         rows: Array.from(byDay.values())
           .sort((a, b) => b.day.localeCompare(a.day))
-          .map((r) => ({
-            day: r.day,
-            input_tokens: r.input_tokens,
-            output_tokens: r.output_tokens,
-            billable_usd: pricing ? Number(r.billable_usd.toFixed(4)) : null,
-          })),
+          .map((r) => {
+            const cost_usd = pricing ? r.cost_usd : null;
+            const price_usd =
+              cost_usd === null ? null : cost_usd * (1 + margin);
+            const cost_native =
+              cost_usd === null ? null : cost_usd * fxRate;
+            const price_native =
+              price_usd === null ? null : price_usd * fxRate;
+            return {
+              day: r.day,
+              input_tokens: r.input_tokens,
+              output_tokens: r.output_tokens,
+              cost_usd:
+                cost_usd === null ? null : Number(cost_usd.toFixed(4)),
+              price_usd:
+                price_usd === null ? null : Number(price_usd.toFixed(4)),
+              cost_native:
+                cost_native === null ? null : Number(cost_native.toFixed(4)),
+              price_native:
+                price_native === null
+                  ? null
+                  : Number(price_native.toFixed(4)),
+              // Back-compat alias the dashboard's KPI uses.
+              billable_usd:
+                price_usd === null ? null : Number(price_usd.toFixed(4)),
+            };
+          }),
       };
     });
 
@@ -898,39 +1170,74 @@ const plugin = definePlugin({
       const to = String(params.to ?? "");
       if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
       const pricing = await loadPricing(ctx, companyId);
+      const currencyCfg = await loadCurrency(ctx, companyId);
+      const fx = await getFxRate(ctx, to, currencyCfg.currency);
+      const fxRate = fx?.rate ?? 1;
+      const margin = pricing ? (pricing.margin.percent || 0) / 100 : 0;
       const daily = await readDaily(ctx, companyId, from, to);
 
-      const byModel = new Map<ModelKey, { input_tokens: number; output_tokens: number; billable_usd: number }>();
-      const marginMultiplier = pricing ? 1 + (pricing.margin.percent || 0) / 100 : 1;
+      const byModel = new Map<
+        ModelKey,
+        {
+          input_tokens: number;
+          output_tokens: number;
+          cost_usd: number;
+        }
+      >();
 
       for (const r of daily) {
         const inp = Number(r.input_tokens) || 0;
         const out = Number(r.output_tokens) || 0;
         let bucket = byModel.get(r.model);
         if (!bucket) {
-          bucket = { input_tokens: 0, output_tokens: 0, billable_usd: 0 };
+          bucket = { input_tokens: 0, output_tokens: 0, cost_usd: 0 };
           byModel.set(r.model, bucket);
         }
         bucket.input_tokens += inp;
         bucket.output_tokens += out;
         if (pricing) {
           const { inputCost, outputCost } = priceFor(r.model, inp, out, pricing);
-          bucket.billable_usd += (inputCost + outputCost) * marginMultiplier;
+          bucket.cost_usd += inputCost + outputCost;
         }
       }
 
       const rows = Array.from(byModel.entries())
-        .map(([model, b]) => ({
-          model,
-          input_tokens: b.input_tokens,
-          output_tokens: b.output_tokens,
-          total_tokens: b.input_tokens + b.output_tokens,
-          billable_usd: pricing ? Number(b.billable_usd.toFixed(4)) : null,
-        }))
+        .map(([model, b]) => {
+          const cost_usd = pricing ? b.cost_usd : null;
+          const price_usd = cost_usd === null ? null : cost_usd * (1 + margin);
+          const cost_native = cost_usd === null ? null : cost_usd * fxRate;
+          const price_native =
+            price_usd === null ? null : price_usd * fxRate;
+          return {
+            model,
+            input_tokens: b.input_tokens,
+            output_tokens: b.output_tokens,
+            total_tokens: b.input_tokens + b.output_tokens,
+            cost_usd: cost_usd === null ? null : Number(cost_usd.toFixed(4)),
+            price_usd:
+              price_usd === null ? null : Number(price_usd.toFixed(4)),
+            cost_native:
+              cost_native === null ? null : Number(cost_native.toFixed(4)),
+            price_native:
+              price_native === null ? null : Number(price_native.toFixed(4)),
+            // Back-compat alias for the previous shape; existing UI code that
+            // reads billable_usd keeps working until callers migrate.
+            billable_usd:
+              price_usd === null ? null : Number(price_usd.toFixed(4)),
+          };
+        })
         .filter((r) => r.total_tokens > 0)
         .sort((a, b) => b.total_tokens - a.total_tokens);
 
-      return { priced: !!pricing, rows };
+      return {
+        priced: !!pricing,
+        currency: currencyCfg.currency,
+        fxRate,
+        fxDay: fx?.day ?? null,
+        fxSource: fx?.source ?? null,
+        marginPercent: pricing?.margin.percent ?? 0,
+        rows,
+      };
     });
 
     ctx.data.register("getCostsOverview", async (params) => {
@@ -997,6 +1304,267 @@ const plugin = definePlugin({
       await ctx.state.set(pricingScope(companyId), config);
       ctx.logger.info("pricing saved", { companyId });
       return { ok: true };
+    });
+
+    // ---- Currency + FX ---------------------------------------------------
+
+    ctx.data.register("getCurrencyConfig", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const cfg = await loadCurrency(ctx, companyId);
+      return { ...cfg, supported: SUPPORTED_CURRENCIES };
+    });
+
+    ctx.actions.register("setCurrencyConfig", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      const currency = params.currency;
+      if (!companyId) throw new Error("companyId is required");
+      if (!isCurrencyCode(currency)) {
+        throw new Error(`Unsupported currency. Pick one of: ${SUPPORTED_CURRENCIES.join(", ")}`);
+      }
+      await ctx.state.set(currencyScope(companyId), { currency });
+      await noteActiveCurrency(ctx, currency);
+      // Best-effort fetch so the dashboard reflects the new currency
+      // immediately rather than waiting up to an hour for the job to run.
+      // Failures are non-fatal — the daily job will retry next hour.
+      try {
+        await ensureTodaysFxRates(ctx);
+      } catch (err) {
+        ctx.logger.warn("FX prefetch after setCurrencyConfig failed", {
+          companyId,
+          currency,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      ctx.logger.info("currency saved", { companyId, currency });
+      return { ok: true };
+    });
+
+    // Status surface for the settings UI: which currency is configured, when
+    // was the last FX fetch for it, and what was the latest rate.
+    ctx.data.register("getFxStatus", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const cfg = await loadCurrency(ctx, companyId);
+      const today = fmtDay(new Date());
+      const fx = await getFxRate(ctx, today, cfg.currency);
+      return {
+        currency: cfg.currency,
+        provider: FX_PROVIDER_NAME,
+        rate: fx?.rate ?? null,
+        rateDay: fx?.day ?? null,
+        rateSource: fx?.source ?? null,
+        identity: cfg.currency === "USD",
+      };
+    });
+
+    // Manual refresh button in Settings. Same idempotent path as the job.
+    ctx.actions.register("refreshFxNow", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (companyId) {
+        // Mark this currency active so the result actually gets written.
+        const cfg = await loadCurrency(ctx, companyId);
+        await noteActiveCurrency(ctx, cfg.currency);
+      }
+      try {
+        const result = await ensureTodaysFxRates(ctx);
+        return { ok: true, ...result };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false, error: message };
+      }
+    });
+
+    // Per-agent breakdown for the period. Used by the dashboard's By-agent
+    // card. Aggregates usage_events by (agent_id, model), counts runs (rows),
+    // sums tokens, prices via priceFor + (1 + margin), and converts to the
+    // company's billing currency at the FX rate for the END of the range.
+    // Agent display names come from ctx.agents.list (capability: agents.read).
+    ctx.data.register("getPerAgentBreakdown", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      const from = String(params.from ?? "");
+      const to = String(params.to ?? "");
+      if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
+
+      const pricing = await loadPricing(ctx, companyId);
+      const currencyCfg = await loadCurrency(ctx, companyId);
+      const fx = await getFxRate(ctx, to, currencyCfg.currency);
+
+      const rows = await ctx.db.query<{
+        agent_id: string | null;
+        model: ModelKey;
+        runs: number | string;
+        input_tokens: number | string;
+        output_tokens: number | string;
+      }>(
+        `SELECT agent_id,
+                model,
+                COUNT(*)            AS runs,
+                SUM(input_tokens)   AS input_tokens,
+                SUM(output_tokens)  AS output_tokens
+           FROM ${q(ctx, "usage_events")}
+          WHERE company_id = $1 AND day >= $2 AND day <= $3
+          GROUP BY agent_id, model`,
+        [companyId, from, to],
+      );
+
+      // Resolve agent names. List once, then keep the map; agents are small per
+      // company. Falls back gracefully if any id isn't found (deleted agent).
+      const nameByAgent = new Map<string, string>();
+      try {
+        const agents = await ctx.agents.list({ companyId });
+        for (const a of agents) {
+          // The Agent type ships with `name` per @paperclipai/shared.
+          const n = (a as unknown as { name?: string }).name;
+          if (a.id && typeof n === "string") nameByAgent.set(a.id, n);
+        }
+      } catch (err) {
+        ctx.logger.warn("agents.list failed; falling back to ids", {
+          companyId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const margin = pricing ? (pricing.margin.percent || 0) / 100 : 0;
+      const fxRate = fx?.rate ?? 1;
+
+      type ModelLine = {
+        model: ModelKey;
+        runs: number;
+        input_tokens: number;
+        output_tokens: number;
+        cost_usd: number | null;
+        price_usd: number | null;
+        cost_native: number | null;
+        price_native: number | null;
+      };
+      type AgentBlock = {
+        agentId: string | null;
+        agentName: string;
+        models: ModelLine[];
+        totals: {
+          runs: number;
+          input_tokens: number;
+          output_tokens: number;
+          cost_usd: number | null;
+          price_usd: number | null;
+          cost_native: number | null;
+          price_native: number | null;
+        };
+      };
+
+      const byAgent = new Map<string, AgentBlock>();
+
+      for (const r of rows) {
+        const inp = Number(r.input_tokens) || 0;
+        const out = Number(r.output_tokens) || 0;
+        const runs = Number(r.runs) || 0;
+        const { inputCost, outputCost } = pricing
+          ? priceFor(r.model, inp, out, pricing)
+          : { inputCost: 0, outputCost: 0 };
+        const cost_usd = pricing ? inputCost + outputCost : null;
+        const price_usd = cost_usd === null ? null : cost_usd * (1 + margin);
+        const cost_native = cost_usd === null ? null : cost_usd * fxRate;
+        const price_native = price_usd === null ? null : price_usd * fxRate;
+
+        const agentId = r.agent_id;
+        const key = agentId ?? "__unattributed__";
+        let block = byAgent.get(key);
+        if (!block) {
+          block = {
+            agentId,
+            agentName:
+              (agentId && nameByAgent.get(agentId)) ||
+              (agentId ? agentId.slice(0, 8) : "Unattributed"),
+            models: [],
+            totals: {
+              runs: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              cost_usd: pricing ? 0 : null,
+              price_usd: pricing ? 0 : null,
+              cost_native: pricing ? 0 : null,
+              price_native: pricing ? 0 : null,
+            },
+          };
+          byAgent.set(key, block);
+        }
+        block.models.push({
+          model: r.model,
+          runs,
+          input_tokens: inp,
+          output_tokens: out,
+          cost_usd,
+          price_usd,
+          cost_native,
+          price_native,
+        });
+        block.totals.runs += runs;
+        block.totals.input_tokens += inp;
+        block.totals.output_tokens += out;
+        if (pricing && cost_usd !== null && price_usd !== null) {
+          block.totals.cost_usd = (block.totals.cost_usd ?? 0) + cost_usd;
+          block.totals.price_usd = (block.totals.price_usd ?? 0) + price_usd;
+          block.totals.cost_native =
+            (block.totals.cost_native ?? 0) + (cost_native ?? 0);
+          block.totals.price_native =
+            (block.totals.price_native ?? 0) + (price_native ?? 0);
+        }
+      }
+
+      // Round and sort once everything's accumulated.
+      const result = Array.from(byAgent.values()).map((block) => ({
+        ...block,
+        models: block.models
+          .map((m) => ({
+            ...m,
+            cost_usd: m.cost_usd === null ? null : Number(m.cost_usd.toFixed(4)),
+            price_usd:
+              m.price_usd === null ? null : Number(m.price_usd.toFixed(4)),
+            cost_native:
+              m.cost_native === null ? null : Number(m.cost_native.toFixed(4)),
+            price_native:
+              m.price_native === null ? null : Number(m.price_native.toFixed(4)),
+          }))
+          .sort((a, b) =>
+            (b.input_tokens + b.output_tokens) -
+            (a.input_tokens + a.output_tokens),
+          ),
+        totals: {
+          ...block.totals,
+          cost_usd:
+            block.totals.cost_usd === null
+              ? null
+              : Number(block.totals.cost_usd.toFixed(4)),
+          price_usd:
+            block.totals.price_usd === null
+              ? null
+              : Number(block.totals.price_usd.toFixed(4)),
+          cost_native:
+            block.totals.cost_native === null
+              ? null
+              : Number(block.totals.cost_native.toFixed(4)),
+          price_native:
+            block.totals.price_native === null
+              ? null
+              : Number(block.totals.price_native.toFixed(4)),
+        },
+      }));
+      result.sort(
+        (a, b) =>
+          (b.totals.input_tokens + b.totals.output_tokens) -
+          (a.totals.input_tokens + a.totals.output_tokens),
+      );
+
+      return {
+        priced: !!pricing,
+        currency: currencyCfg.currency,
+        fxRate: fxRate,
+        fxDay: fx?.day ?? null,
+        fxSource: fx?.source ?? null,
+        marginPercent: pricing?.margin.percent ?? 0,
+        rows: result,
+      };
     });
 
     // Backfill: read the host's historical cost_events for the company over a

@@ -78,6 +78,11 @@ type DailyRow = {
   day: string;
   input_tokens: number;
   output_tokens: number;
+  cost_usd?: number | null;
+  price_usd?: number | null;
+  cost_native?: number | null;
+  price_native?: number | null;
+  // Back-compat alias from v0.5.0 — still surfaced by the worker.
   billable_usd?: number | null;
 };
 
@@ -190,10 +195,56 @@ function fmtInt(n: number): string {
   return n.toLocaleString();
 }
 
-function fmtUsd(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "—";
-  return `$${n.toFixed(2)}`;
+// Format an amount in a specific ISO-4217 currency. Uses Intl.NumberFormat so
+// each currency gets its native symbol and decimals (e.g. JPY: no decimals).
+function fmtMoney(
+  amount: number | null | undefined,
+  currency: string,
+): string {
+  if (amount === null || amount === undefined || !Number.isFinite(amount)) {
+    return "—";
+  }
+  try {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: currency === "JPY" ? 0 : 2,
+      minimumFractionDigits: currency === "JPY" ? 0 : 2,
+    }).format(amount);
+  } catch {
+    // Unknown ISO code — fall back to a plain "CODE 1.23" form.
+    return `${currency} ${amount.toFixed(2)}`;
+  }
 }
+
+// Supported currencies must match the worker's SUPPORTED_CURRENCIES list.
+const UI_CURRENCIES = [
+  "USD",
+  "EUR",
+  "GBP",
+  "CHF",
+  "CAD",
+  "AUD",
+  "JPY",
+  "DKK",
+  "SEK",
+  "NOK",
+] as const;
+type CurrencyCode = (typeof UI_CURRENCIES)[number];
+
+type CurrencyConfigResponse = {
+  currency: CurrencyCode;
+  supported: ReadonlyArray<CurrencyCode>;
+};
+
+type FxStatusResponse = {
+  currency: CurrencyCode;
+  provider: string;
+  rate: number | null;
+  rateDay: string | null;
+  rateSource: string | null;
+  identity: boolean;
+};
 
 // Compact token formatter — matches the host /costs page's "39.6k tok" / "1.0M tok" style.
 function fmtTokens(n: number): string {
@@ -522,14 +573,68 @@ type PerModelRow = {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  cost_usd: number | null;
+  price_usd: number | null;
+  cost_native: number | null;
+  price_native: number | null;
+  // Back-compat alias from v0.5.0.
   billable_usd: number | null;
 };
-type PerModelResponse = { priced: boolean; rows: PerModelRow[] };
+type PerModelResponse = {
+  priced: boolean;
+  currency?: CurrencyCode;
+  fxRate?: number;
+  fxDay?: string | null;
+  fxSource?: string | null;
+  marginPercent?: number;
+  rows: PerModelRow[];
+};
 
 // Daily shape returned by getDailyUsage. The worker wraps rows in { priced, rows },
 // not a bare array — the previous UI read the wrapper as the array and silently
 // produced zeros. This page reads .rows.
-type DailyResponse = { priced: boolean; rows: DailyRow[] };
+type DailyResponse = {
+  priced: boolean;
+  currency?: CurrencyCode;
+  fxRate?: number;
+  fxDay?: string | null;
+  rows: DailyRow[];
+};
+
+// Per-agent breakdown shape returned by getPerAgentBreakdown.
+type PerAgentModelLine = {
+  model: string;
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number | null;
+  price_usd: number | null;
+  cost_native: number | null;
+  price_native: number | null;
+};
+type PerAgentBlock = {
+  agentId: string | null;
+  agentName: string;
+  models: PerAgentModelLine[];
+  totals: {
+    runs: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number | null;
+    price_usd: number | null;
+    cost_native: number | null;
+    price_native: number | null;
+  };
+};
+type PerAgentResponse = {
+  priced: boolean;
+  currency: CurrencyCode;
+  fxRate: number;
+  fxDay: string | null;
+  fxSource: string | null;
+  marginPercent: number;
+  rows: PerAgentBlock[];
+};
 
 // Mirrors HostNavigationLinkProps loosely — the SDK marks href as optional.
 type SettingsLinkProps = {
@@ -564,6 +669,7 @@ function PerModelCard(props: {
   loading: boolean;
   rows: PerModelRow[] | null;
   priced: boolean;
+  currency: CurrencyCode;
   settingsLinkProps: SettingsLinkProps;
 }) {
   if (props.loading) {
@@ -598,7 +704,11 @@ function PerModelCard(props: {
     <section style={styles.card}>
       <div style={styles.cardHeader}>
         <h2 style={styles.sectionTitle}>By model</h2>
-        <span style={styles.mutedLabel}>Input · Output</span>
+        <span style={styles.mutedLabel}>
+          {props.priced
+            ? `Tokens · Cost → Price (${props.currency})`
+            : "Tokens (Input · Output)"}
+        </span>
       </div>
       <div>
         {rows.map((r) => {
@@ -622,8 +732,11 @@ function PerModelCard(props: {
               </div>
               <div style={styles.modelNums}>
                 {fmtTokens(r.total_tokens)} tok
-                {props.priced && r.billable_usd !== null
-                  ? ` · ${fmtUsd(r.billable_usd)}`
+                {props.priced && r.price_native !== null
+                  ? ` · ${fmtMoney(r.cost_native, props.currency)} → ${fmtMoney(
+                      r.price_native,
+                      props.currency,
+                    )}`
                   : ""}
               </div>
             </div>
@@ -635,9 +748,176 @@ function PerModelCard(props: {
           <a {...props.settingsLinkProps} style={styles.link}>
             Set pricing →
           </a>{" "}
-          to show billable USD.
+          to show cost and client price.
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function PerAgentCard(props: {
+  loading: boolean;
+  data: PerAgentResponse | null;
+  settingsLinkProps: SettingsLinkProps;
+}) {
+  if (props.loading) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>By agent</h2>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} style={{ ...styles.skeleton, height: 28 }} />
+          ))}
+        </div>
+      </section>
+    );
+  }
+  const d = props.data;
+  const blocks = d?.rows ?? [];
+  if (blocks.length === 0) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>By agent</h2>
+        </div>
+        <div style={{ color: "var(--muted-foreground)", fontSize: 13 }}>
+          No agent activity recorded for this period.
+        </div>
+      </section>
+    );
+  }
+  const priced = !!d?.priced;
+  const currency: CurrencyCode = (d?.currency ?? "USD") as CurrencyCode;
+
+  const colHead: React.CSSProperties = {
+    fontSize: 11,
+    color: "var(--muted-foreground)",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    fontWeight: 600,
+    padding: "8px 10px",
+    borderBottom: "1px solid var(--border)",
+    textAlign: "right",
+    whiteSpace: "nowrap",
+  };
+  const colHeadLeft: React.CSSProperties = { ...colHead, textAlign: "left" };
+  const cell: React.CSSProperties = {
+    padding: "8px 10px",
+    fontSize: 13,
+    color: "var(--foreground)",
+    fontVariantNumeric: "tabular-nums",
+    textAlign: "right",
+    whiteSpace: "nowrap",
+  };
+  const subRowCell: React.CSSProperties = {
+    ...cell,
+    fontSize: 12,
+    color: "var(--muted-foreground)",
+    borderTop: "1px dashed var(--border)",
+  };
+  const subRowLeft: React.CSSProperties = { ...subRowCell, textAlign: "left" };
+  const totalCell: React.CSSProperties = {
+    ...cell,
+    fontWeight: 600,
+    background: "var(--muted)",
+  };
+  const totalLeft: React.CSSProperties = {
+    ...totalCell,
+    textAlign: "left",
+  };
+
+  return (
+    <section style={styles.card}>
+      <div style={styles.cardHeader}>
+        <h2 style={styles.sectionTitle}>By agent</h2>
+        <span style={styles.mutedLabel}>
+          {priced
+            ? `Tokens · Runs · Cost → Price (${currency})`
+            : "Tokens · Runs"}
+        </span>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={colHeadLeft}>Agent / Model</th>
+              <th style={colHead}>Runs</th>
+              <th style={colHead}>Input</th>
+              <th style={colHead}>Output</th>
+              {priced && <th style={colHead}>Cost</th>}
+              {priced && <th style={colHead}>Price</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {blocks.map((block, blockIdx) => (
+              <React.Fragment key={block.agentId ?? `agent-${blockIdx}`}>
+                <tr>
+                  <td style={totalLeft}>{block.agentName}</td>
+                  <td style={totalCell}>{fmtInt(block.totals.runs)}</td>
+                  <td style={totalCell}>
+                    {fmtTokens(block.totals.input_tokens)}
+                  </td>
+                  <td style={totalCell}>
+                    {fmtTokens(block.totals.output_tokens)}
+                  </td>
+                  {priced && (
+                    <td style={totalCell}>
+                      {fmtMoney(block.totals.cost_native, currency)}
+                    </td>
+                  )}
+                  {priced && (
+                    <td style={totalCell}>
+                      {fmtMoney(block.totals.price_native, currency)}
+                    </td>
+                  )}
+                </tr>
+                {block.models.map((m) => (
+                  <tr key={`${block.agentId ?? "u"}-${m.model}`}>
+                    <td style={subRowLeft}>
+                      <span style={{ color: "var(--muted-foreground)", marginRight: 8 }}>
+                        └
+                      </span>
+                      {(MODEL_LABELS as Record<string, string>)[m.model] ??
+                        m.model}
+                    </td>
+                    <td style={subRowCell}>{fmtInt(m.runs)}</td>
+                    <td style={subRowCell}>{fmtTokens(m.input_tokens)}</td>
+                    <td style={subRowCell}>{fmtTokens(m.output_tokens)}</td>
+                    {priced && (
+                      <td style={subRowCell}>
+                        {fmtMoney(m.cost_native, currency)}
+                      </td>
+                    )}
+                    {priced && (
+                      <td style={subRowCell}>
+                        {fmtMoney(m.price_native, currency)}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!priced ? (
+        <div style={{ marginTop: 12, fontSize: 12 }}>
+          <a {...props.settingsLinkProps} style={styles.link}>
+            Set pricing →
+          </a>{" "}
+          to show per-agent cost and client price.
+        </div>
+      ) : (
+        <div style={{ marginTop: 12, fontSize: 11, color: "var(--muted-foreground)" }}>
+          Cost = tokens × per-1M rate · Price = Cost × (1 + margin{" "}
+          {d?.marginPercent ?? 0}%)
+          {d?.fxRate && d.fxRate !== 1
+            ? `, converted at 1 USD = ${d.fxRate.toFixed(4)} ${currency} (${d.fxDay ?? "?"})`
+            : ""}
+        </div>
+      )}
     </section>
   );
 }
@@ -780,6 +1060,11 @@ export function UsagePage(): JSX.Element {
     from,
     to,
   });
+  const perAgent = usePluginData<PerAgentResponse>("getPerAgentBreakdown", {
+    companyId,
+    from,
+    to,
+  });
   const pricing = usePluginData<unknown>("getPricing", { companyId });
 
   const pricingConfig = useMemo(
@@ -787,6 +1072,10 @@ export function UsagePage(): JSX.Element {
     [pricing.data],
   );
   const hasPricing = !!pricingConfig;
+  const currency: CurrencyCode = (daily.data?.currency ??
+    perModel.data?.currency ??
+    perAgent.data?.currency ??
+    "USD") as CurrencyCode;
 
   const dailyRows: DailyRow[] = useMemo(() => {
     const d = daily.data;
@@ -802,17 +1091,28 @@ export function UsagePage(): JSX.Element {
   const totals = useMemo(() => {
     let inp = 0;
     let out = 0;
-    let billable = 0;
-    let hasBillable = false;
+    let cost_native = 0;
+    let price_native = 0;
+    let hasCost = false;
     for (const r of dailyRows) {
       inp += Number(r.input_tokens) || 0;
       out += Number(r.output_tokens) || 0;
-      if (typeof r.billable_usd === "number") {
-        billable += r.billable_usd;
-        hasBillable = true;
+      // Prefer the new currency-aware fields. Fall back to billable_usd which
+      // older worker builds returned in USD only.
+      if (typeof r.cost_native === "number") {
+        cost_native += r.cost_native;
+        hasCost = true;
+      } else if (typeof (r as { cost_usd?: number }).cost_usd === "number") {
+        cost_native += (r as { cost_usd: number }).cost_usd;
+        hasCost = true;
+      }
+      if (typeof r.price_native === "number") {
+        price_native += r.price_native;
+      } else if (typeof r.billable_usd === "number") {
+        price_native += r.billable_usd;
       }
     }
-    return { inp, out, billable, hasBillable };
+    return { inp, out, cost_native, price_native, hasCost };
   }, [dailyRows]);
 
   // Download the CSV by fetching it and triggering an anchor with the `download`
@@ -875,6 +1175,7 @@ export function UsagePage(): JSX.Element {
       });
       daily.refresh();
       perModel.refresh();
+      perAgent.refresh();
     } catch (err) {
       toast?.({
         title: "Backfill failed",
@@ -884,7 +1185,7 @@ export function UsagePage(): JSX.Element {
     } finally {
       setBackfilling(false);
     }
-  }, [backfillFromCostEvents, backfilling, companyId, daily, from, perModel, to, toast]);
+  }, [backfillFromCostEvents, backfilling, companyId, daily, from, perAgent, perModel, to, toast]);
 
   if (!companyId) {
     return (
@@ -1023,9 +1324,11 @@ export function UsagePage(): JSX.Element {
           loading={isLoading}
         />
         <KpiCard
-          label="Billable"
+          label={`Cost (${currency})`}
           value={
-            hasPricing && totals.hasBillable ? fmtUsd(totals.billable) : "—"
+            hasPricing && totals.hasCost
+              ? fmtMoney(totals.cost_native, currency)
+              : "—"
           }
           loading={isLoading}
           sub={
@@ -1033,6 +1336,22 @@ export function UsagePage(): JSX.Element {
               <a {...settingsLinkProps} style={styles.link}>
                 Set pricing →
               </a>
+            ) : (
+              <span style={styles.kpiSub}>before margin</span>
+            )
+          }
+        />
+        <KpiCard
+          label={`Price (${currency})`}
+          value={
+            hasPricing && totals.hasCost
+              ? fmtMoney(totals.price_native, currency)
+              : "—"
+          }
+          loading={isLoading}
+          sub={
+            hasPricing ? (
+              <span style={styles.kpiSub}>client invoice</span>
             ) : undefined
           }
         />
@@ -1043,6 +1362,14 @@ export function UsagePage(): JSX.Element {
         loading={perModel.loading}
         rows={perModel.data?.rows ?? null}
         priced={!!perModel.data?.priced}
+        currency={currency}
+        settingsLinkProps={settingsLinkProps}
+      />
+
+      {/* By agent */}
+      <PerAgentCard
+        loading={perAgent.loading}
+        data={perAgent.data ?? null}
         settingsLinkProps={settingsLinkProps}
       />
 
@@ -1091,11 +1418,20 @@ export function SettingsPage(): JSX.Element {
   const pricing = usePluginData<PricingConfig | null>("getPricing", {
     companyId,
   });
+  const currencyConfig = usePluginData<CurrencyConfigResponse>(
+    "getCurrencyConfig",
+    { companyId },
+  );
+  const fxStatus = usePluginData<FxStatusResponse>("getFxStatus", { companyId });
   const setPricing = usePluginAction("setPricing");
+  const setCurrencyAction = usePluginAction("setCurrencyConfig");
+  const refreshFxAction = usePluginAction("refreshFxNow");
   const toast = usePluginToast();
 
   const [config, setConfig] = useState<PricingConfig>(DEFAULT_PRICING);
   const [saving, setSaving] = useState(false);
+  const [savingCurrency, setSavingCurrency] = useState(false);
+  const [refreshingFx, setRefreshingFx] = useState(false);
 
   useEffect(() => {
     const normalized = normalizePricing(pricing.data);
@@ -1127,6 +1463,64 @@ export function SettingsPage(): JSX.Element {
       toast?.({ title: "Save failed", body: String(err), tone: "error" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const onCurrencyChange = async (next: CurrencyCode) => {
+    setSavingCurrency(true);
+    try {
+      await setCurrencyAction({ companyId, currency: next });
+      toast?.({
+        title: `Billing currency set to ${next}`,
+        body:
+          next === "USD"
+            ? "USD is the base currency — no FX conversion applied."
+            : "Latest FX rate fetched. Dashboard now displays prices in the new currency.",
+        tone: "success",
+      });
+      currencyConfig.refresh();
+      fxStatus.refresh();
+    } catch (err) {
+      toast?.({
+        title: "Could not save currency",
+        body: String(err instanceof Error ? err.message : err),
+        tone: "error",
+      });
+    } finally {
+      setSavingCurrency(false);
+    }
+  };
+
+  const onRefreshFx = async () => {
+    setRefreshingFx(true);
+    try {
+      const result = (await refreshFxAction({ companyId })) as {
+        ok: boolean;
+        fetched?: boolean;
+        day?: string;
+        written?: string[];
+        skipped?: string[];
+        error?: string;
+      };
+      if (!result.ok) throw new Error(result.error || "FX refresh failed");
+      toast?.({
+        title: result.fetched
+          ? `FX refreshed for ${result.day}`
+          : "FX is already up to date",
+        body: result.fetched
+          ? `Written: ${(result.written ?? []).join(", ") || "—"}`
+          : undefined,
+        tone: "success",
+      });
+      fxStatus.refresh();
+    } catch (err) {
+      toast?.({
+        title: "FX refresh failed",
+        body: String(err instanceof Error ? err.message : err),
+        tone: "error",
+      });
+    } finally {
+      setRefreshingFx(false);
     }
   };
 
@@ -1228,6 +1622,80 @@ export function SettingsPage(): JSX.Element {
           ))}
         </tbody>
       </table>
+
+      {/* Billing currency + FX status */}
+      <div
+        style={{
+          marginTop: 24,
+          padding: 16,
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          background: "var(--card)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h3 style={{ ...styles.sectionTitle, margin: 0 }}>Billing currency</h3>
+            <p style={{ fontSize: 12, color: "var(--muted-foreground)", margin: "4px 0 0" }}>
+              Per-1M rates are in USD. Choose what currency the client sees;
+              the worker fetches a daily USD→target rate from{" "}
+              <code>open.er-api.com</code> and stores one row per day per
+              currency in <code>fx_rates</code>. Conversion happens at query
+              time so changing currency or margin later doesn't require a
+              resnapshot.
+            </p>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontSize: 13, color: "var(--foreground)" }} htmlFor="ctu-currency-select">
+            Currency
+          </label>
+          <select
+            id="ctu-currency-select"
+            style={{ ...styles.input, minWidth: 140 }}
+            value={currencyConfig.data?.currency ?? "USD"}
+            disabled={savingCurrency || currencyConfig.loading}
+            onChange={(e) => onCurrencyChange(e.target.value as CurrencyCode)}
+          >
+            {(currencyConfig.data?.supported ?? UI_CURRENCIES).map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            style={styles.btn}
+            onClick={onRefreshFx}
+            disabled={refreshingFx}
+            title="Force-refresh today's FX rate now instead of waiting for the hourly job"
+          >
+            {refreshingFx ? "Refreshing…" : "Refresh FX now"}
+          </button>
+        </div>
+
+        <div style={{ marginTop: 12, fontSize: 12, color: "var(--muted-foreground)", fontVariantNumeric: "tabular-nums" }}>
+          {fxStatus.loading ? (
+            "Loading FX status…"
+          ) : !fxStatus.data ? (
+            "No FX status available."
+          ) : fxStatus.data.identity ? (
+            <>USD is the base currency — no conversion is applied.</>
+          ) : fxStatus.data.rate === null ? (
+            <>
+              No FX rate stored yet for {fxStatus.data.currency}. Click{" "}
+              <em>Refresh FX now</em> to fetch one.
+            </>
+          ) : (
+            <>
+              1 USD = {fxStatus.data.rate?.toFixed(4)} {fxStatus.data.currency}{" "}
+              (as of {fxStatus.data.rateDay ?? "?"} via{" "}
+              {fxStatus.data.rateSource ?? fxStatus.data.provider})
+            </>
+          )}
+        </div>
+      </div>
 
       <div style={{ marginTop: 20, display: "flex", gap: 12, alignItems: "center" }}>
         <label style={{ fontSize: 13, color: "var(--tu-fg)" }}>Margin %</label>
