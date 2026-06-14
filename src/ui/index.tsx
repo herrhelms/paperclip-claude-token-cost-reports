@@ -108,9 +108,25 @@ const PRICED_MODEL_KEYS: ReadonlyArray<ModelKey> = [
   "sonnet-4-5-1m",
 ];
 
+type SubscriptionPreset = "off" | "pro" | "max";
+
+const SUBSCRIPTION_PRESETS: ReadonlyArray<{
+  key: SubscriptionPreset;
+  divisor: number;
+  label: string;
+}> = [
+  { key: "off", divisor: 1,  label: "Off — bill full list price" },
+  { key: "pro", divisor: 5,  label: "Claude Pro (÷5)" },
+  { key: "max", divisor: 20, label: "Claude Max (÷20)" },
+];
+
 type PricingConfig = {
   pricing: Record<ModelKey, { input: number; output: number }>;
   margin: { percent: number };
+  subscription?: {
+    preset: SubscriptionPreset;
+    divisor: number;
+  };
 };
 
 // Defaults from https://platform.claude.com/docs/en/about-claude/pricing#model-pricing.
@@ -129,6 +145,7 @@ const DEFAULT_PRICING: PricingConfig = {
     "sonnet-4-5-1m": { input: 3, output: 15 },
   },
   margin: { percent: 0 },
+  subscription: { preset: "off", divisor: 1 },
 };
 
 // Display labels for the settings table. Match the user's requested format: "Opus 4.8", "Opus 4.8[1m]".
@@ -181,6 +198,22 @@ function normalizePricing(raw: unknown): PricingConfig | null {
   } else if (typeof (r as { marginPercent?: unknown }).marginPercent === "number") {
     // tolerate old flat shape if any was persisted
     out.margin.percent = (r as { marginPercent: number }).marginPercent;
+  }
+  // Subscription mode is optional (added in 0.7.0). Default to "off" when
+  // missing or malformed so pre-0.7.0 configs keep showing full list price.
+  const sub = r.subscription as
+    | { preset?: unknown; divisor?: unknown }
+    | undefined;
+  if (sub && (sub.preset === "off" || sub.preset === "pro" || sub.preset === "max")) {
+    const divisor =
+      typeof sub.divisor === "number" && sub.divisor > 0
+        ? sub.divisor
+        : sub.preset === "pro"
+          ? 5
+          : sub.preset === "max"
+            ? 20
+            : 1;
+    out.subscription = { preset: sub.preset, divisor };
   }
   return out;
 }
@@ -633,6 +666,12 @@ type PerAgentResponse = {
   fxDay: string | null;
   fxSource: string | null;
   marginPercent: number;
+  // Optional for back-compat with workers older than 0.7.0.
+  subscription?: {
+    enabled: boolean;
+    preset: SubscriptionPreset;
+    divisor: number;
+  };
   rows: PerAgentBlock[];
 };
 
@@ -790,6 +829,14 @@ function PerAgentCard(props: {
   }
   const priced = !!d?.priced;
   const currency: CurrencyCode = (d?.currency ?? "USD") as CurrencyCode;
+  const subEnabled = !!d?.subscription?.enabled;
+  const subDivisor = d?.subscription?.divisor ?? 1;
+  // Column labels switch based on subscription state. When off, columns are
+  // "Cost" (list-price equivalent) and "Price" (Cost × margin). When on, the
+  // chargeback column reflects the divisor, so it's renamed "Sub-adjusted"
+  // and the raw column is renamed "List" so the math is obvious.
+  const costLabel = subEnabled ? "List" : "Cost";
+  const priceLabel = subEnabled ? `Sub-adjusted (÷${subDivisor})` : "Price";
 
   const colHead: React.CSSProperties = {
     fontSize: 11,
@@ -834,7 +881,7 @@ function PerAgentCard(props: {
         <h2 style={styles.sectionTitle}>By agent</h2>
         <span style={styles.mutedLabel}>
           {priced
-            ? `Tokens · Runs · Cost → Price (${currency})`
+            ? `Tokens · Runs · ${costLabel} → ${priceLabel} (${currency})`
             : "Tokens · Runs"}
         </span>
       </div>
@@ -846,8 +893,8 @@ function PerAgentCard(props: {
               <th style={colHead}>Runs</th>
               <th style={colHead}>Input</th>
               <th style={colHead}>Output</th>
-              {priced && <th style={colHead}>Cost</th>}
-              {priced && <th style={colHead}>Price</th>}
+              {priced && <th style={colHead}>{costLabel}</th>}
+              {priced && <th style={colHead}>{priceLabel}</th>}
             </tr>
           </thead>
           <tbody>
@@ -911,8 +958,18 @@ function PerAgentCard(props: {
         </div>
       ) : (
         <div style={{ marginTop: 12, fontSize: 11, color: "var(--muted-foreground)" }}>
-          Cost = tokens × per-1M rate · Price = Cost × (1 + margin{" "}
-          {d?.marginPercent ?? 0}%)
+          {subEnabled ? (
+            <>
+              <strong>{costLabel}</strong> = tokens × per-1M rate (full API list
+              price) · <strong>{priceLabel}</strong> = {costLabel} ÷ {subDivisor}{" "}
+              × (1 + margin {d?.marginPercent ?? 0}%)
+            </>
+          ) : (
+            <>
+              <strong>Cost</strong> = tokens × per-1M rate ·{" "}
+              <strong>Price</strong> = Cost × (1 + margin {d?.marginPercent ?? 0}%)
+            </>
+          )}
           {d?.fxRate && d.fxRate !== 1
             ? `, converted at 1 USD = ${d.fxRate.toFixed(4)} ${currency} (${d.fxDay ?? "?"})`
             : ""}
@@ -1124,7 +1181,10 @@ export function UsagePage(): JSX.Element {
     const url = `/api/plugins/claude-token-usage/api/export/monthly.csv?companyId=${encodeURIComponent(
       companyId,
     )}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-    const filename = `usage-${companyId}-${from}-${to}-monthly.csv`;
+    // Filename suffix mirrors the worker's Content-Disposition: include the
+    // currency code so multi-currency exports for the same period don't clobber
+    // each other on disk.
+    const filename = `usage-${companyId}-${from}-${to}-${currency}.csv`;
     let blobUrl: string | null = null;
     try {
       const res = await fetch(url, {
@@ -1712,6 +1772,55 @@ export function SettingsPage(): JSX.Element {
           }
           style={{ ...styles.input, width: 120 }}
         />
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <label
+            style={{ fontSize: 13, color: "var(--tu-fg)" }}
+            htmlFor="subscription-preset"
+          >
+            Subscription
+          </label>
+          <select
+            id="subscription-preset"
+            value={config.subscription?.preset ?? "off"}
+            onChange={(e) => {
+              const preset = e.target.value as SubscriptionPreset;
+              const match =
+                SUBSCRIPTION_PRESETS.find((p) => p.key === preset) ??
+                SUBSCRIPTION_PRESETS[0];
+              setConfig((c) => ({
+                ...c,
+                subscription: { preset: match.key, divisor: match.divisor },
+              }));
+            }}
+            style={{ ...styles.input, width: 240 }}
+          >
+            {SUBSCRIPTION_PRESETS.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p
+          style={{
+            marginTop: 8,
+            fontSize: 12,
+            color: "var(--tu-muted)",
+            maxWidth: 640,
+          }}
+        >
+          When a subscription preset is active, the chargeback column on the
+          usage dashboard is divided by the preset's multiplier before margin
+          is applied. The list-price column is unchanged, so you can see the
+          subscription savings at a glance.
+          <br />
+          Example: $100 tokens · Pro (÷5) · 10% margin → cost $20 → price{" "}
+          <strong>$22</strong>. With margin in EUR at 0.80, that's{" "}
+          <strong>€17.60</strong>.
+        </p>
       </div>
 
       <div style={{ marginTop: 24, display: "flex", gap: 12 }}>
