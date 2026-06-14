@@ -998,6 +998,101 @@ const plugin = definePlugin({
       ctx.logger.info("pricing saved", { companyId });
       return { ok: true };
     });
+
+    // Backfill: read the host's historical cost_events for the company over a
+    // date range and ingest them into our usage_events table. Idempotent —
+    // source_event_id is prefixed `cost_event:<id>` so re-running the same range
+    // is a no-op via ON CONFLICT DO NOTHING. After ingest, every affected day
+    // is re-rolled-up so the dashboard catches up immediately.
+    //
+    // Token math mirrors the live ingest path: input_tokens + cached_input_tokens
+    // both land in `input_tokens` because pricing applies the same rate to both
+    // and the operator doesn't care about cache attribution at the bill level.
+    ctx.actions.register("backfillFromCostEvents", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      const from = String(params.from ?? "");
+      const to = String(params.to ?? "");
+      if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
+      // Range is inclusive of the to-date. Use a half-open window in the SQL
+      // so a row with occurred_at=23:59:59 on `to` still lands inside.
+      const fromIso = `${from}T00:00:00Z`;
+      const toIso = `${to}T23:59:59.999Z`;
+
+      type Row = {
+        id: string;
+        company_id: string;
+        agent_id: string | null;
+        model: string;
+        input_tokens: number | string | null;
+        cached_input_tokens: number | string | null;
+        output_tokens: number | string | null;
+        occurred_at: string;
+      };
+
+      const rows = await ctx.db.query<Row>(
+        `SELECT id::text             AS id,
+                company_id::text     AS company_id,
+                agent_id::text       AS agent_id,
+                model,
+                input_tokens,
+                cached_input_tokens,
+                output_tokens,
+                occurred_at::text    AS occurred_at
+           FROM public.cost_events
+          WHERE company_id = $1::uuid
+            AND occurred_at >= $2::timestamptz
+            AND occurred_at <= $3::timestamptz`,
+        [companyId, fromIso, toIso],
+      );
+
+      let inserted = 0;
+      const affectedDays = new Set<string>();
+
+      for (const r of rows) {
+        const inp = Number(r.input_tokens) || 0;
+        const cached = Number(r.cached_input_tokens) || 0;
+        const out = Number(r.output_tokens) || 0;
+        if (!inp && !cached && !out) continue;
+        const day = String(r.occurred_at).slice(0, 10);
+        const result = await ctx.db.execute(
+          `INSERT INTO ${q(ctx, "usage_events")}
+             (source_event_id, company_id, agent_id, model, input_tokens, output_tokens, occurred_at, day)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (source_event_id) DO NOTHING`,
+          [
+            `cost_event:${r.id}`,
+            r.company_id,
+            r.agent_id,
+            normalizeModel(r.model),
+            inp + cached,
+            out,
+            r.occurred_at,
+            day,
+          ],
+        );
+        if (result.rowCount > 0) inserted++;
+        affectedDays.add(day);
+      }
+
+      for (const day of affectedDays) {
+        await rollupCompanyDay(ctx, companyId, day);
+      }
+
+      ctx.logger.info("backfill complete", {
+        companyId,
+        from,
+        to,
+        scanned: rows.length,
+        inserted,
+        daysRolledUp: affectedDays.size,
+      });
+      return {
+        scanned: rows.length,
+        inserted,
+        daysRolledUp: affectedDays.size,
+        days: Array.from(affectedDays).sort(),
+      };
+    });
   },
 
   async onApiRequest(input: PluginApiRequestInput): Promise<PluginApiResponse> {

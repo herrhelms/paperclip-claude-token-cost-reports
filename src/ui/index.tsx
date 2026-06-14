@@ -758,6 +758,9 @@ export function UsagePage(): JSX.Element {
   const [customFrom, setCustomFrom] = useState(isoDateOffset(30));
   const [customTo, setCustomTo] = useState(isoDateOffset(0));
   const [downloading, setDownloading] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
+
+  const backfillFromCostEvents = usePluginAction("backfillFromCostEvents");
 
   const { from, to } = useMemo(
     () =>
@@ -851,6 +854,37 @@ export function UsagePage(): JSX.Element {
       setDownloading(false);
     }
   }, [companyId, from, to, downloading, toast]);
+
+  // Backfill historical cost_events into usage_events, then refresh.
+  // Useful right after installing the plugin: the live subscription only
+  // catches events going forward, but anything in public.cost_events for
+  // this company and range can be ingested retroactively.
+  const runBackfill = useCallback(async () => {
+    if (backfilling || !companyId) return;
+    setBackfilling(true);
+    try {
+      const result = (await backfillFromCostEvents({
+        companyId,
+        from,
+        to,
+      })) as { scanned: number; inserted: number; daysRolledUp: number };
+      toast?.({
+        title: "Backfill complete",
+        body: `${result.inserted} new events ingested · ${result.daysRolledUp} day(s) re-rolled-up · scanned ${result.scanned}`,
+        tone: "success",
+      });
+      daily.refresh();
+      perModel.refresh();
+    } catch (err) {
+      toast?.({
+        title: "Backfill failed",
+        body: String(err instanceof Error ? err.message : err),
+        tone: "error",
+      });
+    } finally {
+      setBackfilling(false);
+    }
+  }, [backfillFromCostEvents, backfilling, companyId, daily, from, perModel, to, toast]);
 
   if (!companyId) {
     return (
@@ -958,6 +992,17 @@ export function UsagePage(): JSX.Element {
             </button>
           </>
         )}
+        <div style={{ marginLeft: "auto" }}>
+          <button
+            type="button"
+            style={styles.btn}
+            onClick={runBackfill}
+            disabled={backfilling}
+            title="Scan the host's cost_events table for this period and ingest anything missing"
+          >
+            {backfilling ? "Backfilling…" : "Backfill from history"}
+          </button>
+        </div>
       </div>
 
       {/* KPI row */}

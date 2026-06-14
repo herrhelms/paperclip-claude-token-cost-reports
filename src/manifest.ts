@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "claude-token-usage",
   apiVersion: 1,
-  version: "0.5.0",
+  version: "0.6.0",
   displayName: "Claude Token Usage",
   description:
     "Track Claude token usage per company, accumulate daily totals, and export a monthly CSV priced at configurable per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M context variants). The dashboard is mounted at the host's company-scoped plugin page (open from the company sidebar) and per-company pricing is configured here in the plugin settings.",
@@ -39,6 +39,11 @@ const manifest: PaperclipPluginManifestV1 = {
   },
   database: {
     migrationsDir: "migrations",
+    // Read-only access to the host's cost_events table so the worker can
+    // backfill historical token usage that pre-dates the plugin install.
+    // The host whitelists this table for plugin reads; ctx.db.query can
+    // SELECT from public.cost_events but cannot mutate it.
+    coreReadTables: ["cost_events"],
   },
   jobs: [
     {
