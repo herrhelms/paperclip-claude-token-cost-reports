@@ -1274,7 +1274,7 @@ export function SettingsPage(): JSX.Element {
       <p style={{ color: "var(--tu-muted)", fontSize: 13, marginTop: 4 }}>
         Pricing configured here is consumed by the dashboard at{" "}
         <a {...usageLinkProps} style={styles.link}>
-          /{host?.companyPrefix ?? "$COMPANY_HANDLE"}/plugins/{PLUGIN_KEY}/{USAGE_ROUTE_SLUG}
+          /{host?.companyPrefix ?? "$COMPANY_HANDLE"}/{USAGE_ROUTE_SLUG}
         </a>
         . Rates are in USD per 1M tokens. Defaults match the current public
         Anthropic API list prices from{" "}
