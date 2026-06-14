@@ -52,7 +52,9 @@
     "paperclip-plugin",
     "tokens",
     "usage",
+    "usage-costs",
     "billing",
+    "pricing",
     "claude"
   ],
   "license": "UNLICENSED"
