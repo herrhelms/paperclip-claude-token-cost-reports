@@ -16,6 +16,12 @@ const manifest: PaperclipPluginManifestV1 = {
     "database.namespace.write",
     "api.routes.register",
     "ui.page.register",
+    // Pricing config is stored in ctx.state (company-scoped) so it survives
+    // reinstalls and migration changes. The host gates reads and writes via
+    // separate capabilities — declaring only .write means saves succeed but
+    // loadPricing(getPricing) silently returns null on the next render and the
+    // UI falls back to defaults. Declare both.
+    "plugin.state.read",
     "plugin.state.write",
     "jobs.schedule",
     "instance.settings.register",
