@@ -1307,7 +1307,7 @@ export function SettingsPage(): JSX.Element {
               <td style={styles.td}>
                 <input
                   type="number"
-                  step="0.01"
+                  step="0.1"
                   min="0"
                   value={config.pricing[m.key].input}
                   onChange={(e) =>
@@ -1320,7 +1320,7 @@ export function SettingsPage(): JSX.Element {
               <td style={styles.td}>
                 <input
                   type="number"
-                  step="0.01"
+                  step="0.1"
                   min="0"
                   value={config.pricing[m.key].output}
                   onChange={(e) =>
