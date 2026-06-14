@@ -820,7 +820,13 @@ const plugin = definePlugin({
       }
     });
 
-    ctx.actions.register("getDailyUsage", async (params) => {
+    // Read-only fetchers used by the UI's usePluginData(...) hooks live on
+    // ctx.data.register, NOT ctx.actions.register. The host wires data and
+    // actions through separate registries; usePluginData calls into the data
+    // registry while usePluginAction calls into the actions registry. The
+    // earlier mismatch caused every getter (pricing, daily, monthly, costs,
+    // ingest) to silently no-op in the UI, falling back to default state.
+    ctx.data.register("getDailyUsage", async (params) => {
       const companyId = String(params.companyId ?? "");
       const from = String(params.from ?? "");
       const to = String(params.to ?? "");
@@ -869,7 +875,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("getMonthlySummary", async (params) => {
+    ctx.data.register("getMonthlySummary", async (params) => {
       const companyId = String(params.companyId ?? "");
       const from = String(params.from ?? "");
       const to = String(params.to ?? "");
@@ -882,7 +888,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("getCostsOverview", async (params) => {
+    ctx.data.register("getCostsOverview", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
       return buildCostsOverview(ctx, companyId);
@@ -892,7 +898,7 @@ const plugin = definePlugin({
     // flowing to the worker. If totalEvents is 0 the host probably hasn't
     // granted `costs.read` — surface that to the operator instead of silently
     // showing empty cards.
-    ctx.actions.register("getIngestStats", async (params) => {
+    ctx.data.register("getIngestStats", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
       const now = new Date();
@@ -928,7 +934,7 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register("getPricing", async (params) => {
+    ctx.data.register("getPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
       const existing = await loadPricing(ctx, companyId);
