@@ -888,6 +888,51 @@ const plugin = definePlugin({
       };
     });
 
+    // Per-model breakdown for the period. Feeds the dashboard's "By model"
+    // chart: one row per model that appears in usage_daily for the range,
+    // sorted by total_tokens desc. Drops "unknown" if it contributed zero.
+    // Billable USD is filled when pricing is configured; null otherwise.
+    ctx.data.register("getPerModelForRange", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      const from = String(params.from ?? "");
+      const to = String(params.to ?? "");
+      if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
+      const pricing = await loadPricing(ctx, companyId);
+      const daily = await readDaily(ctx, companyId, from, to);
+
+      const byModel = new Map<ModelKey, { input_tokens: number; output_tokens: number; billable_usd: number }>();
+      const marginMultiplier = pricing ? 1 + (pricing.margin.percent || 0) / 100 : 1;
+
+      for (const r of daily) {
+        const inp = Number(r.input_tokens) || 0;
+        const out = Number(r.output_tokens) || 0;
+        let bucket = byModel.get(r.model);
+        if (!bucket) {
+          bucket = { input_tokens: 0, output_tokens: 0, billable_usd: 0 };
+          byModel.set(r.model, bucket);
+        }
+        bucket.input_tokens += inp;
+        bucket.output_tokens += out;
+        if (pricing) {
+          const { inputCost, outputCost } = priceFor(r.model, inp, out, pricing);
+          bucket.billable_usd += (inputCost + outputCost) * marginMultiplier;
+        }
+      }
+
+      const rows = Array.from(byModel.entries())
+        .map(([model, b]) => ({
+          model,
+          input_tokens: b.input_tokens,
+          output_tokens: b.output_tokens,
+          total_tokens: b.input_tokens + b.output_tokens,
+          billable_usd: pricing ? Number(b.billable_usd.toFixed(4)) : null,
+        }))
+        .filter((r) => r.total_tokens > 0)
+        .sort((a, b) => b.total_tokens - a.total_tokens);
+
+      return { priced: !!pricing, rows };
+    });
+
     ctx.data.register("getCostsOverview", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");

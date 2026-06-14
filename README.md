@@ -8,9 +8,11 @@ Designed for operators on a Claude Max 20x Pro plan who want to translate flat-r
 
 - Subscribes to `cost_event.created` and `agent.run.finished` and writes one row per event into a private `usage_events` table (idempotent on `source_event_id`).
 - Runs a `*/15 * * * *` rollup job that recomputes `usage_daily` for each company.
-- Exposes a `Token Usage` page per company with date-range KPIs, a daily table, and a calendar-month rollup table.
-- Exposes a `Token Usage Settings` page where you configure `$/1M input` and `$/1M output` rates per model (Opus, Sonnet, Haiku) plus a global margin %.
+- Exposes a client-presentation `Token Usage` page per company with KPI cards (total / input / output / billable USD), a per-model horizontal bar chart, and a daily volume column chart for the selected period.
+- Defaults to the current calendar month, with a month stepper for prior months and a custom-range fallback for ad-hoc queries.
+- Exposes a `Token Usage Settings` page where you configure `$/1M input` and `$/1M output` rates per Claude model (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus the 1M-context variants) and a global margin %.
 - Exposes a scoped JSON route that streams a monthly billing CSV: `month, month_start, month_end, input_tokens, output_tokens, input_cost_usd, output_cost_usd, total_billed_usd`.
+- Inherits the host's Paperclip theme (light/dark, shadcn-style cards) by referencing host CSS variables directly.
 
 ## Surface
 

@@ -81,84 +81,6 @@ type DailyRow = {
   billable_usd?: number | null;
 };
 
-type MonthlyRow = {
-  month: string;
-  month_start: string;
-  month_end: string;
-  input_tokens: number;
-  output_tokens: number;
-  input_cost_usd?: number | null;
-  output_cost_usd?: number | null;
-  total_billed_usd?: number | null;
-};
-
-// Mirrors the shape returned by the worker's getIngestStats action.
-// Lets the UI prove the cost_event.created pipeline is actually flowing —
-// if the host hasn't granted costs.read, this is how the operator finds out.
-type IngestStats = {
-  asOf: string;
-  totalEvents: number;
-  last24hEvents: number;
-  lastEventAt: string | null;
-  hasCostsReadCapability: boolean;
-  diagnosticHint: string | null;
-};
-
-// Mirrors the shape returned by the worker's getCostsOverview action.
-// Tracks the same data the host /costs page surfaces: rolling windows over the
-// last 5h / 24h / 7d, a subscription-vs-API split, and per-model breakdown.
-type CostsOverview = {
-  asOf: string;
-  windowStart: string;
-  rollingWindows: Array<{
-    windowKey: "5h" | "24h" | "7d";
-    tokens: number;
-    costUsd: number | null;
-  }>;
-  subscription: {
-    runs: number;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    subscriptionTokens: number;
-    apiTokens: number;
-    subscriptionShare: number;
-  };
-  perModel: Array<{
-    rawModel: string;
-    normalizedKey: ModelKey | "unknown";
-    provider: string;
-    source: string;
-    tokens: number;
-    tokenShare: number;
-    costUsd: number | null;
-  }>;
-  perAgent: Array<{
-    agentId: string;
-    agentName: string;
-    agentTitle: string | null;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    apiRuns: number;
-    subscriptionRuns: number;
-    costUsd: number | null;
-    models: Array<{
-      rawModel: string;
-      normalizedKey: ModelKey | "unknown";
-      provider: string;
-      source: string;
-      tokens: number;
-      inputTokens: number;
-      outputTokens: number;
-      agentTokenShare: number;
-      costUsd: number | null;
-    }>;
-  }>;
-  priced: boolean;
-  quotaNote: string;
-};
-
 // Model keys mirror the worker's PRICED_MODEL_KEYS. Keep in sync.
 type ModelKey =
   | "opus-4-8"
@@ -282,65 +204,20 @@ function fmtTokens(n: number): string {
   return n.toLocaleString();
 }
 
-function fmtPercent(share: number): string {
-  if (!isFinite(share)) return "0%";
-  return `${Math.round(share * 100)}%`;
-}
-
-function fmtRelativeTime(isoOrNull: string | null, nowMs: number): string {
-  if (!isoOrNull) return "never";
-  const t = Date.parse(isoOrNull);
-  if (!isFinite(t)) return "never";
-  const deltaSec = Math.max(0, Math.round((nowMs - t) / 1000));
-  if (deltaSec < 60) return `${deltaSec}s ago`;
-  if (deltaSec < 3600) return `${Math.round(deltaSec / 60)}m ago`;
-  if (deltaSec < 24 * 3600) return `${Math.round(deltaSec / 3600)}h ago`;
-  return `${Math.round(deltaSec / 86400)}d ago`;
-}
-
+// Host theme integration: the Paperclip app defines shadcn-style CSS variables
+// on :root (--background, --foreground, --card, --border, --muted,
+// --muted-foreground, --primary, --primary-foreground, --accent, --destructive,
+// --ring). The plugin UI runs same-origin so we reference them directly and
+// inherit the host's light/dark theme automatically. No more custom palette,
+// no media queries, no class-based dark-mode overrides.
+// The host stores tokens as direct oklch() values (confirmed by inspecting
+// /assets/index-*.css), so we reference them as var(--token), not
+// hsl(var(--token)). The dark theme is toggled by a parent class on the host
+// root; the cascade flows into our subtree automatically.
 const THEME_CSS = `
 .tu-root {
-  --tu-fg: #111;
-  --tu-muted: #57606a;
-  --tu-border: #d0d7de;
-  --tu-border-soft: #eaecef;
-  --tu-card-bg: #fafbfc;
-  --tu-table-head-bg: #f6f8fa;
-  --tu-input-bg: #fff;
-  --tu-input-fg: #111;
-  --tu-accent: #0969da;
-  --tu-accent-fg: #fff;
-  --tu-btn-bg: #fff;
+  color: var(--foreground);
   color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  .tu-root {
-    --tu-fg: #e6edf3;
-    --tu-muted: #8b949e;
-    --tu-border: #30363d;
-    --tu-border-soft: #21262d;
-    --tu-card-bg: #161b22;
-    --tu-table-head-bg: #161b22;
-    --tu-input-bg: #0d1117;
-    --tu-input-fg: #e6edf3;
-    --tu-accent: #2f81f7;
-    --tu-accent-fg: #fff;
-    --tu-btn-bg: #21262d;
-  }
-}
-:is(.dark, [data-theme="dark"], .theme-dark) .tu-root,
-.tu-root:is(.dark, [data-theme="dark"]) {
-  --tu-fg: #e6edf3;
-  --tu-muted: #8b949e;
-  --tu-border: #30363d;
-  --tu-border-soft: #21262d;
-  --tu-card-bg: #161b22;
-  --tu-table-head-bg: #161b22;
-  --tu-input-bg: #0d1117;
-  --tu-input-fg: #e6edf3;
-  --tu-accent: #2f81f7;
-  --tu-accent-fg: #fff;
-  --tu-btn-bg: #21262d;
 }
 .tu-root input[type="number"],
 .tu-root input[type="date"] {
@@ -348,232 +225,248 @@ const THEME_CSS = `
 }
 `;
 
+// Style tokens mapped to host CSS variables so the page tracks Paperclip's
+// theme. Card shape (border radius, padding, border weight) mirrors the host's
+// shadcn-style cards seen elsewhere in the app.
 const styles = {
   page: {
     padding: "24px",
     fontFamily:
       "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
-    color: "var(--tu-fg)",
-    maxWidth: 1100,
+    color: "var(--foreground)",
+    maxWidth: 1200,
     margin: "0 auto",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 20,
   } as React.CSSProperties,
   header: {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 16,
     flexWrap: "wrap" as const,
     gap: 12,
-  },
-  title: { fontSize: 22, fontWeight: 600, margin: 0, color: "var(--tu-fg)" },
+  } as React.CSSProperties,
+  headerLeft: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 4,
+  } as React.CSSProperties,
+  title: {
+    fontSize: 22,
+    fontWeight: 600,
+    margin: 0,
+    color: "var(--foreground)",
+    letterSpacing: -0.2,
+  } as React.CSSProperties,
+  subtitle: {
+    fontSize: 13,
+    color: "var(--muted-foreground)",
+    margin: 0,
+  } as React.CSSProperties,
   controls: {
     display: "flex",
     gap: 8,
     alignItems: "center",
     flexWrap: "wrap" as const,
-  },
+  } as React.CSSProperties,
   input: {
     padding: "6px 10px",
-    border: "1px solid var(--tu-border)",
-    borderRadius: 6,
+    border: "1px solid var(--border)",
+    borderRadius: 8,
     fontSize: 13,
-    background: "var(--tu-input-bg)",
-    color: "var(--tu-input-fg)",
+    background: "var(--background)",
+    color: "var(--foreground)",
   } as React.CSSProperties,
   btn: {
     padding: "6px 12px",
-    border: "1px solid var(--tu-border)",
-    borderRadius: 6,
-    background: "var(--tu-btn-bg)",
-    color: "var(--tu-fg)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    background: "var(--background)",
+    color: "var(--foreground)",
     cursor: "pointer",
     fontSize: 13,
+    fontWeight: 500,
   } as React.CSSProperties,
   btnPrimary: {
-    padding: "6px 12px",
-    border: "1px solid var(--tu-accent)",
-    borderRadius: 6,
-    background: "var(--tu-accent)",
-    color: "var(--tu-accent-fg)",
+    padding: "6px 14px",
+    border: "1px solid var(--primary)",
+    borderRadius: 8,
+    background: "var(--primary)",
+    color: "var(--primary-foreground)",
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 600,
+  } as React.CSSProperties,
+  btnGhost: {
+    padding: "6px 10px",
+    border: "1px solid transparent",
+    borderRadius: 8,
+    background: "transparent",
+    color: "var(--foreground)",
     cursor: "pointer",
     fontSize: 13,
   } as React.CSSProperties,
+  btnIcon: {
+    width: 32,
+    height: 32,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    background: "var(--background)",
+    color: "var(--foreground)",
+    cursor: "pointer",
+    padding: 0,
+    fontSize: 14,
+    lineHeight: 1,
+  } as React.CSSProperties,
+
+  // Card shells
+  card: {
+    border: "1px solid var(--border)",
+    borderRadius: 12,
+    background: "var(--card)",
+    color: "var(--foreground)",
+    padding: 20,
+  } as React.CSSProperties,
+  cardHeader: {
+    display: "flex",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    marginBottom: 16,
+    gap: 12,
+    flexWrap: "wrap" as const,
+  } as React.CSSProperties,
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: 600,
+    margin: 0,
+    color: "var(--foreground)",
+  } as React.CSSProperties,
+
+  // KPI grid
   kpiRow: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
     gap: 12,
-    margin: "20px 0",
   } as React.CSSProperties,
   kpi: {
-    border: "1px solid var(--tu-border)",
-    borderRadius: 8,
+    border: "1px solid var(--border)",
+    borderRadius: 12,
     padding: 16,
-    background: "var(--tu-card-bg)",
-    color: "var(--tu-fg)",
+    background: "var(--card)",
+    color: "var(--foreground)",
   } as React.CSSProperties,
   kpiLabel: {
-    fontSize: 12,
-    color: "var(--tu-muted)",
+    fontSize: 11,
+    color: "var(--muted-foreground)",
     textTransform: "uppercase" as const,
-    letterSpacing: 0.5,
-  },
-  kpiValue: { fontSize: 24, fontWeight: 600, marginTop: 4, color: "var(--tu-fg)" },
-  sectionTitle: {
-    fontSize: 16,
+    letterSpacing: 0.6,
     fontWeight: 600,
-    margin: "24px 0 8px",
-    color: "var(--tu-fg)",
-  },
+  } as React.CSSProperties,
+  kpiValue: {
+    fontSize: 26,
+    fontWeight: 700,
+    marginTop: 6,
+    color: "var(--foreground)",
+    fontVariantNumeric: "tabular-nums" as const,
+    letterSpacing: -0.5,
+  } as React.CSSProperties,
+  kpiSub: {
+    fontSize: 12,
+    color: "var(--muted-foreground)",
+    marginTop: 4,
+  } as React.CSSProperties,
+
+  // Per-model rows
+  modelRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 160px) 1fr minmax(120px, auto)",
+    gap: 12,
+    alignItems: "center",
+    paddingBlock: 6,
+  } as React.CSSProperties,
+  modelLabel: {
+    fontSize: 13,
+    fontWeight: 500,
+    color: "var(--foreground)",
+  } as React.CSSProperties,
+  modelNums: {
+    fontSize: 12,
+    color: "var(--muted-foreground)",
+    fontVariantNumeric: "tabular-nums" as const,
+    textAlign: "right" as const,
+    whiteSpace: "nowrap" as const,
+  } as React.CSSProperties,
+  chartTrack: {
+    height: 10,
+    width: "100%",
+    background: "var(--muted)",
+    borderRadius: 999,
+    overflow: "hidden" as const,
+    display: "flex",
+  } as React.CSSProperties,
+  chartFillInput: {
+    height: "100%",
+    background: "var(--primary)",
+  } as React.CSSProperties,
+  chartFillOutput: {
+    height: "100%",
+    background: "var(--primary)",
+    opacity: 0.45,
+  } as React.CSSProperties,
+
+  // Skeleton blocks for loading state
+  skeleton: {
+    background: "var(--muted)",
+    borderRadius: 6,
+    height: 14,
+    width: "100%",
+    opacity: 0.6,
+  } as React.CSSProperties,
+
+  // Table (used by SettingsPage)
   table: {
     width: "100%",
     borderCollapse: "collapse" as const,
     fontSize: 13,
-    color: "var(--tu-fg)",
-  },
+    color: "var(--foreground)",
+  } as React.CSSProperties,
   th: {
     textAlign: "left" as const,
     padding: "8px 10px",
-    borderBottom: "2px solid var(--tu-border)",
-    background: "var(--tu-table-head-bg)",
-    color: "var(--tu-fg)",
+    borderBottom: "1px solid var(--border)",
+    color: "var(--muted-foreground)",
     fontWeight: 600,
-  },
+    fontSize: 12,
+    textTransform: "uppercase" as const,
+    letterSpacing: 0.5,
+  } as React.CSSProperties,
   td: {
-    padding: "8px 10px",
-    borderBottom: "1px solid var(--tu-border-soft)",
-    color: "var(--tu-fg)",
-  },
+    padding: "10px",
+    borderBottom: "1px solid var(--border)",
+    color: "var(--foreground)",
+  } as React.CSSProperties,
+
   empty: {
     padding: 24,
     textAlign: "center" as const,
-    color: "var(--tu-muted)",
-    border: "1px dashed var(--tu-border)",
-    borderRadius: 8,
-  },
-  link: { color: "var(--tu-accent)", textDecoration: "none", fontSize: 13 },
-  mutedLabel: { fontSize: 12, color: "var(--tu-muted)" },
-
-  // Costs overview card — mirrors the host /costs page card.
-  costsCard: {
-    border: "1px solid var(--tu-border)",
-    borderRadius: 8,
-    padding: 16,
-    background: "var(--tu-card-bg)",
-    color: "var(--tu-fg)",
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: 16,
-    margin: "20px 0",
+    color: "var(--muted-foreground)",
+    border: "1px dashed var(--border)",
+    borderRadius: 12,
+    background: "var(--card)",
   } as React.CSSProperties,
-  costsSection: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: 8,
+  link: {
+    color: "var(--primary)",
+    textDecoration: "underline",
+    textUnderlineOffset: 3,
+    fontSize: 13,
   } as React.CSSProperties,
-  costsSectionLabel: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: "var(--tu-muted)",
-    textTransform: "uppercase" as const,
-    letterSpacing: 0.5,
-    margin: 0,
-  } as React.CSSProperties,
-  costsRow: {
-    display: "grid",
-    gridTemplateColumns: "32px 1fr auto",
-    alignItems: "center",
-    gap: 8,
+  mutedLabel: {
     fontSize: 12,
-  } as React.CSSProperties,
-  costsRowKey: {
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    color: "var(--tu-muted)",
-  } as React.CSSProperties,
-  costsRowTok: {
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    color: "var(--tu-muted)",
-  } as React.CSSProperties,
-  costsRowCost: {
-    fontVariantNumeric: "tabular-nums" as const,
-    fontWeight: 500,
-  } as React.CSSProperties,
-  costsBar: {
-    height: 8,
-    width: "100%",
-    border: "1px solid var(--tu-border)",
-    overflow: "hidden" as const,
-    borderRadius: 3,
-    position: "relative" as const,
-  } as React.CSSProperties,
-  costsBarFill: {
-    height: "100%",
-    background: "var(--tu-accent)",
-    opacity: 0.6,
-    transition: "width 150ms ease",
-  } as React.CSSProperties,
-  costsBarFillCost: {
-    position: "absolute" as const,
-    inset: 0,
-    background: "var(--tu-accent)",
-    opacity: 0.85,
-    transition: "width 150ms ease",
-  } as React.CSSProperties,
-  costsDivider: {
-    borderTop: "1px solid var(--tu-border-soft)",
-    margin: 0,
-  } as React.CSSProperties,
-  costsModelRow: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: 6,
-  } as React.CSSProperties,
-  costsModelHead: {
-    display: "flex",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 8,
-  } as React.CSSProperties,
-  costsModelName: {
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    fontSize: 12,
-    color: "var(--tu-fg)",
-    display: "block",
-  } as React.CSSProperties,
-  costsModelSub: {
-    fontSize: 11,
-    color: "var(--tu-muted)",
-    display: "block",
-    marginTop: 2,
-  } as React.CSSProperties,
-  costsNote: {
-    fontSize: 11,
-    color: "var(--tu-muted)",
-    margin: 0,
-    fontStyle: "italic" as const,
-  } as React.CSSProperties,
-  costsHealthOk: {
-    fontSize: 11,
-    color: "var(--tu-muted)",
-    display: "flex",
-    alignItems: "center",
-    gap: 6,
-    margin: 0,
-  } as React.CSSProperties,
-  costsHealthWarn: {
-    fontSize: 12,
-    color: "#b54708",
-    background: "rgba(255, 196, 0, 0.08)",
-    border: "1px solid rgba(255, 196, 0, 0.3)",
-    borderRadius: 6,
-    padding: "8px 10px",
-    margin: 0,
-  } as React.CSSProperties,
-  healthDot: {
-    width: 8,
-    height: 8,
-    borderRadius: "50%",
-    background: "#16a34a",
-    display: "inline-block",
+    color: "var(--muted-foreground)",
   } as React.CSSProperties,
 };
 
@@ -581,372 +474,275 @@ function ThemeStyles(): JSX.Element {
   return <style>{THEME_CSS}</style>;
 }
 
-/**
- * Costs overview card — mirrors the host /costs page card.
- *
- * Top section: rolling 5h / 24h / 7d totals with a bar showing each window's
- * share of the maximum (so the 7d bar caps the visual scale).
- * Middle section: subscription summary (runs · total · in · out) + a bar
- * indicating the subscription share of total token traffic.
- * Bottom section: per-model breakdown bars grouped by `rawModel`.
- *
- * Quota windows (Current session / Current week / Sonnet-only) are deliberately
- * absent — that data is sourced from Claude CLI local state and isn't exposed
- * via `cost_event.created`. We surface a small note explaining this gap.
- */
-function CostsOverviewCard(props: {
-  costs: CostsOverview | null;
-  loading: boolean;
-  ingest: IngestStats | null;
-}): JSX.Element | null {
-  const { costs, loading, ingest } = props;
-  const nowMs = useMemo(() => Date.now(), []);
-  if (loading && !costs) {
-    return (
-      <div style={styles.costsCard}>
-        <div style={styles.costsSection}>
-          <p style={styles.costsSectionLabel}>Costs overview</p>
-          <p style={{ fontSize: 12, color: "var(--tu-muted)" }}>Loading…</p>
-        </div>
+
+// ---- Page-level helpers (month anchor, range math) ----
+
+type MonthAnchor = { year: number; month: number };
+
+function todayMonth(): MonthAnchor {
+  const d = new Date();
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() };
+}
+
+function monthLabel(a: MonthAnchor): string {
+  return new Date(Date.UTC(a.year, a.month, 1)).toLocaleString("en-US", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function monthBounds(a: MonthAnchor): { from: string; to: string } {
+  const start = new Date(Date.UTC(a.year, a.month, 1));
+  const end = new Date(Date.UTC(a.year, a.month + 1, 0));
+  return {
+    from: start.toISOString().slice(0, 10),
+    to: end.toISOString().slice(0, 10),
+  };
+}
+
+function prevMonth(a: MonthAnchor): MonthAnchor {
+  const d = new Date(Date.UTC(a.year, a.month - 1, 1));
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() };
+}
+
+function nextMonth(a: MonthAnchor): MonthAnchor {
+  const d = new Date(Date.UTC(a.year, a.month + 1, 1));
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() };
+}
+
+function isFutureMonth(a: MonthAnchor): boolean {
+  const cur = todayMonth();
+  return a.year > cur.year || (a.year === cur.year && a.month > cur.month);
+}
+
+// Per-model shape returned by the worker's getPerModelForRange handler.
+type PerModelRow = {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  billable_usd: number | null;
+};
+type PerModelResponse = { priced: boolean; rows: PerModelRow[] };
+
+// Daily shape returned by getDailyUsage. The worker wraps rows in { priced, rows },
+// not a bare array — the previous UI read the wrapper as the array and silently
+// produced zeros. This page reads .rows.
+type DailyResponse = { priced: boolean; rows: DailyRow[] };
+
+// Mirrors HostNavigationLinkProps loosely — the SDK marks href as optional.
+type SettingsLinkProps = {
+  href?: string;
+  onClick: (event: React.MouseEvent<HTMLAnchorElement>) => void;
+};
+
+// ---- Sub-components ----
+
+function KpiCard(props: {
+  label: string;
+  value: string;
+  sub?: React.ReactNode;
+  loading?: boolean;
+}) {
+  return (
+    <div style={styles.kpi}>
+      <div style={styles.kpiLabel}>{props.label}</div>
+      <div style={styles.kpiValue}>
+        {props.loading ? (
+          <div style={{ ...styles.skeleton, height: 24, width: "60%" }} />
+        ) : (
+          props.value
+        )}
       </div>
+      {props.sub ? <div style={styles.kpiSub}>{props.sub}</div> : null}
+    </div>
+  );
+}
+
+function PerModelCard(props: {
+  loading: boolean;
+  rows: PerModelRow[] | null;
+  priced: boolean;
+  settingsLinkProps: SettingsLinkProps;
+}) {
+  if (props.loading) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>By model</h2>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} style={{ ...styles.skeleton, height: 22 }} />
+          ))}
+        </div>
+      </section>
     );
   }
-  if (!costs) return null;
-
-  const windowMax = Math.max(
-    1,
-    ...costs.rollingWindows.map((w) => w.tokens),
-  );
-
-  const showHealthBanner = !!ingest && ingest.totalEvents === 0;
-  const healthOk = !!ingest && ingest.totalEvents > 0;
-
+  const rows = props.rows ?? [];
+  if (rows.length === 0) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>By model</h2>
+        </div>
+        <div style={{ color: "var(--muted-foreground)", fontSize: 13 }}>
+          No model usage recorded for this period.
+        </div>
+      </section>
+    );
+  }
+  const maxTotal = Math.max(...rows.map((r) => r.total_tokens), 1);
   return (
-    <div style={styles.costsCard}>
-      {showHealthBanner && (
-        <p style={styles.costsHealthWarn}>
-          <strong>No cost events ingested yet.</strong>{" "}
-          {ingest!.hasCostsReadCapability
-            ? "The worker is subscribed to cost_event.created and the costs.read capability is granted; events may take a few minutes to flow after install, or the host may not be emitting any."
-            : "The running manifest does not declare costs.read — the host gates cost_event.created delivery behind this capability. Reinstall or upgrade the plugin so the host re-evaluates capabilities."}
-        </p>
-      )}
-      {healthOk && (
-        <p style={styles.costsHealthOk}>
-          <span style={styles.healthDot} />
-          Live · {fmtInt(ingest!.totalEvents)} events · last{" "}
-          {fmtRelativeTime(ingest!.lastEventAt, nowMs)} ·{" "}
-          {fmtInt(ingest!.last24hEvents)} in 24h
-        </p>
-      )}
-
-      {/* Rolling windows */}
-      <div style={styles.costsSection}>
-        <p style={styles.costsSectionLabel}>Rolling windows</p>
-        {costs.rollingWindows.map((w) => {
-          const widthPct = (w.tokens / windowMax) * 100;
+    <section style={styles.card}>
+      <div style={styles.cardHeader}>
+        <h2 style={styles.sectionTitle}>By model</h2>
+        <span style={styles.mutedLabel}>Input · Output</span>
+      </div>
+      <div>
+        {rows.map((r) => {
+          const totalPct = (r.total_tokens / maxTotal) * 100;
+          const inputShare =
+            r.total_tokens > 0 ? r.input_tokens / r.total_tokens : 0;
+          const inputPct = totalPct * inputShare;
+          const outputPct = totalPct * (1 - inputShare);
+          const label =
+            (MODEL_LABELS as Record<string, string>)[r.model] ?? r.model;
           return (
-            <div key={w.windowKey} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={styles.costsRow}>
-                <span style={styles.costsRowKey}>{w.windowKey}</span>
-                <span style={styles.costsRowTok}>{fmtTokens(w.tokens)} tok</span>
-                <span style={styles.costsRowCost}>{fmtUsd(w.costUsd)}</span>
+            <div key={r.model} style={styles.modelRow}>
+              <div style={styles.modelLabel}>{label}</div>
+              <div style={styles.chartTrack} aria-hidden>
+                <div
+                  style={{ ...styles.chartFillInput, width: `${inputPct}%` }}
+                />
+                <div
+                  style={{ ...styles.chartFillOutput, width: `${outputPct}%` }}
+                />
               </div>
-              <div style={styles.costsBar}>
-                <div style={{ ...styles.costsBarFill, width: `${widthPct}%` }} />
+              <div style={styles.modelNums}>
+                {fmtTokens(r.total_tokens)} tok
+                {props.priced && r.billable_usd !== null
+                  ? ` · ${fmtUsd(r.billable_usd)}`
+                  : ""}
               </div>
             </div>
           );
         })}
       </div>
-
-      <div style={styles.costsDivider} />
-
-      {/* Subscription summary */}
-      <div style={styles.costsSection}>
-        <p style={styles.costsSectionLabel}>Subscription</p>
-        <p style={{ fontSize: 12, color: "var(--tu-muted)", margin: 0 }}>
-          <span style={{ fontFamily: "ui-monospace, Menlo, monospace", color: "var(--tu-fg)" }}>
-            {fmtInt(costs.subscription.runs)}
-          </span>{" "}
-          runs ·{" "}
-          <span style={{ fontFamily: "ui-monospace, Menlo, monospace", color: "var(--tu-fg)" }}>
-            {fmtTokens(costs.subscription.totalTokens)}
-          </span>{" "}
-          total ·{" "}
-          <span style={{ fontFamily: "ui-monospace, Menlo, monospace", color: "var(--tu-fg)" }}>
-            {fmtTokens(costs.subscription.inputTokens)}
-          </span>{" "}
-          in ·{" "}
-          <span style={{ fontFamily: "ui-monospace, Menlo, monospace", color: "var(--tu-fg)" }}>
-            {fmtTokens(costs.subscription.outputTokens)}
-          </span>{" "}
-          out
-        </p>
-        <div style={{ ...styles.costsBar, height: 6 }}>
-          <div
-            style={{
-              ...styles.costsBarFill,
-              width: `${costs.subscription.subscriptionShare * 100}%`,
-            }}
-          />
+      {!props.priced ? (
+        <div style={{ marginTop: 12, fontSize: 12 }}>
+          <a {...props.settingsLinkProps} style={styles.link}>
+            Set pricing →
+          </a>{" "}
+          to show billable USD.
         </div>
-        <p style={{ fontSize: 11, color: "var(--tu-muted)", margin: 0 }}>
-          {fmtPercent(costs.subscription.subscriptionShare)} of token usage via subscription
-        </p>
-      </div>
-
-      <div style={styles.costsDivider} />
-
-      {/* Per-model breakdown */}
-      <div style={styles.costsSection}>
-        <p style={styles.costsSectionLabel}>Per model</p>
-        {costs.perModel.length === 0 ? (
-          <p style={styles.costsNote}>No usage in the last 7 days.</p>
-        ) : (
-          costs.perModel.map((m) => {
-            const tokenPct = m.tokenShare * 100;
-            return (
-              <div key={`${m.rawModel}|${m.source}`} style={styles.costsModelRow}>
-                <div style={styles.costsModelHead}>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={styles.costsModelName}>{m.rawModel}</span>
-                    <span style={styles.costsModelSub}>
-                      {m.provider.charAt(0).toUpperCase() + m.provider.slice(1)} ·{" "}
-                      {m.source.charAt(0).toUpperCase() + m.source.slice(1)}
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 12,
-                      flexShrink: 0,
-                      fontSize: 12,
-                      fontVariantNumeric: "tabular-nums",
-                    }}
-                  >
-                    <span style={{ color: "var(--tu-muted)" }}>{fmtTokens(m.tokens)} tok</span>
-                    <span style={{ fontWeight: 500 }}>{fmtUsd(m.costUsd)}</span>
-                  </div>
-                </div>
-                <div style={styles.costsBar}>
-                  <div
-                    style={{ ...styles.costsBarFill, width: `${tokenPct}%` }}
-                    title={`${fmtPercent(m.tokenShare)} of provider tokens`}
-                  />
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
-
-      <div style={styles.costsDivider} />
-
-      {/* Per-agent breakdown — mirrors host /costs "What each agent consumed". */}
-      <CostsPerAgentSection rows={costs.perAgent} />
-
-      <div style={styles.costsDivider} />
-
-      <p style={styles.costsNote}>{costs.quotaNote}</p>
-    </div>
+      ) : null}
+    </section>
   );
 }
 
-/**
- * Per-agent breakdown rendered as a list of expandable rows. Collapsed shows
- * the agent name, total in/out tokens, and the api/subscription run split.
- * Expanded reveals one row per (model, source) the agent used.
- */
-function CostsPerAgentSection(props: {
-  rows: CostsOverview["perAgent"];
-}): JSX.Element {
-  const { rows } = props;
-  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
-  const toggle = (id: string) => {
-    setOpenIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
+function DailyChartCard(props: {
+  loading: boolean;
+  rows: DailyRow[];
+  from: string;
+  to: string;
+}) {
+  if (props.loading) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>Daily volume</h2>
+        </div>
+        <div style={{ ...styles.skeleton, height: 120, borderRadius: 8 }} />
+      </section>
+    );
+  }
+  // Build a dense day-by-day series from `from` to `to`, filling zero where the
+  // rollup table has no row. Iterating bounded by `to` ensures we don't draw a
+  // gap when usage only landed on some days.
+  const byDay = new Map<string, number>();
+  for (const r of props.rows) {
+    const total = (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0);
+    byDay.set(r.day, (byDay.get(r.day) ?? 0) + total);
+  }
+  const days: { day: string; total: number }[] = [];
+  const cursor = new Date(props.from + "T00:00:00Z");
+  const end = new Date(props.to + "T00:00:00Z");
+  while (cursor.getTime() <= end.getTime() && days.length < 366) {
+    const day = cursor.toISOString().slice(0, 10);
+    days.push({ day, total: byDay.get(day) ?? 0 });
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  const totalsZero = days.every((d) => d.total === 0);
+  if (totalsZero) {
+    return (
+      <section style={styles.card}>
+        <div style={styles.cardHeader}>
+          <h2 style={styles.sectionTitle}>Daily volume</h2>
+        </div>
+        <div style={{ color: "var(--muted-foreground)", fontSize: 13 }}>
+          No usage recorded for this period yet.
+        </div>
+      </section>
+    );
+  }
+  const maxTotal = Math.max(1, ...days.map((d) => d.total));
+  const W = 1000;
+  const H = 120;
+  const gap = 2;
+  const colW = Math.max(1, (W - gap * (days.length - 1)) / days.length);
   return (
-    <div style={styles.costsSection}>
-      <p style={styles.costsSectionLabel}>What each agent consumed</p>
-      {rows.length === 0 ? (
-        <p style={styles.costsNote}>
-          No per-agent usage in the last 7 days. (Events without an agent id are excluded.)
-        </p>
-      ) : (
-        rows.map((a) => {
-          const isOpen = openIds.has(a.agentId);
-          const initials = agentInitials(a.agentName);
+    <section style={styles.card}>
+      <div style={styles.cardHeader}>
+        <h2 style={styles.sectionTitle}>Daily volume</h2>
+        <span style={styles.mutedLabel}>
+          peak {fmtTokens(maxTotal)} tok/day
+        </span>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        style={{ width: "100%", height: 120, display: "block" }}
+        role="img"
+        aria-label="Daily token volume across the selected period"
+      >
+        {days.map((d, i) => {
+          if (d.total <= 0) return null;
+          const h = Math.max(2, (d.total / maxTotal) * (H - 4));
+          const x = i * (colW + gap);
+          const y = H - h;
           return (
-            <div
-              key={a.agentId}
-              style={{
-                border: "1px solid var(--tu-border-soft)",
-                borderRadius: 6,
-                padding: 10,
-                display: "flex",
-                flexDirection: "column",
-                gap: 8,
-              }}
+            <rect
+              key={d.day}
+              x={x}
+              y={y}
+              width={colW}
+              height={h}
+              rx={Math.min(1.5, colW / 2)}
+              ry={Math.min(1.5, colW / 2)}
+              fill="var(--primary)"
             >
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={() => toggle(a.agentId)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    toggle(a.agentId);
-                  }
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  cursor: "pointer",
-                  userSelect: "none",
-                }}
-              >
-                <span
-                  aria-hidden
-                  style={{
-                    fontFamily: "ui-monospace, Menlo, monospace",
-                    fontSize: 11,
-                    color: "var(--tu-muted)",
-                    width: 12,
-                  }}
-                >
-                  {isOpen ? "▾" : "▸"}
-                </span>
-                <span
-                  aria-hidden
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: "50%",
-                    background: "var(--tu-border-soft)",
-                    color: "var(--tu-fg)",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 11,
-                    fontWeight: 600,
-                  }}
-                >
-                  {initials}
-                </span>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: "var(--tu-fg)" }}>
-                    {a.agentName}
-                  </div>
-                  {a.agentTitle && (
-                    <div style={{ fontSize: 11, color: "var(--tu-muted)" }}>{a.agentTitle}</div>
-                  )}
-                </div>
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-end",
-                    gap: 2,
-                    flexShrink: 0,
-                    fontSize: 12,
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  <span style={{ fontWeight: 600 }}>{fmtUsd(a.costUsd)}</span>
-                  <span style={{ color: "var(--tu-muted)" }}>
-                    in {fmtTokens(a.inputTokens)} · out {fmtTokens(a.outputTokens)}
-                  </span>
-                  <span style={{ color: "var(--tu-muted)", fontSize: 11 }}>
-                    {fmtInt(a.apiRuns)} api · {fmtInt(a.subscriptionRuns)} subscription
-                  </span>
-                </div>
-              </div>
-
-              {isOpen && a.models.length > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
-                    paddingLeft: 50,
-                    borderLeft: "1px dashed var(--tu-border-soft)",
-                    marginLeft: 20,
-                  }}
-                >
-                  {a.models.map((m) => (
-                    <div
-                      key={`${a.agentId}|${m.rawModel}|${m.source}`}
-                      style={styles.costsModelRow}
-                    >
-                      <div style={styles.costsModelHead}>
-                        <div style={{ minWidth: 0 }}>
-                          <span style={styles.costsModelName}>
-                            {m.provider.charAt(0).toUpperCase() + m.provider.slice(1)}
-                            {" / "}
-                            {m.rawModel}
-                          </span>
-                          <span style={styles.costsModelSub}>
-                            {m.provider.charAt(0).toUpperCase() + m.provider.slice(1)} ·{" "}
-                            {m.source.charAt(0).toUpperCase() + m.source.slice(1)}
-                          </span>
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 12,
-                            flexShrink: 0,
-                            fontSize: 12,
-                            fontVariantNumeric: "tabular-nums",
-                          }}
-                        >
-                          <span style={{ color: "var(--tu-muted)" }}>
-                            {fmtTokens(m.tokens)} tok
-                          </span>
-                          <span style={{ fontWeight: 500 }}>
-                            {fmtUsd(m.costUsd)}{" "}
-                            <span style={{ color: "var(--tu-muted)", fontWeight: 400 }}>
-                              ({fmtPercent(m.agentTokenShare)})
-                            </span>
-                          </span>
-                        </div>
-                      </div>
-                      <div style={styles.costsBar}>
-                        <div
-                          style={{
-                            ...styles.costsBarFill,
-                            width: `${m.agentTokenShare * 100}%`,
-                          }}
-                          title={`${fmtPercent(m.agentTokenShare)} of this agent's tokens`}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+              <title>{`${d.day}: ${fmtInt(d.total)} tokens`}</title>
+            </rect>
           );
-        })
-      )}
-    </div>
+        })}
+      </svg>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginTop: 8,
+          fontSize: 11,
+          color: "var(--muted-foreground)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        <span>{props.from}</span>
+        <span>{props.to}</span>
+      </div>
+    </section>
   );
-}
-
-function agentInitials(name: string): string {
-  if (!name) return "?";
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 export function UsagePage(): JSX.Element {
@@ -956,61 +752,71 @@ export function UsagePage(): JSX.Element {
   const companyId = host?.companyId ?? "";
   const settingsHref = useSettingsHref();
   const settingsLinkProps = nav.linkProps(settingsHref);
+
+  const [mode, setMode] = useState<"month" | "custom">("month");
+  const [anchor, setAnchor] = useState<MonthAnchor>(() => todayMonth());
+  const [customFrom, setCustomFrom] = useState(isoDateOffset(30));
+  const [customTo, setCustomTo] = useState(isoDateOffset(0));
   const [downloading, setDownloading] = useState(false);
-  const [from, setFrom] = useState(isoDateOffset(30));
-  const [to, setTo] = useState(isoDateOffset(0));
 
-  const daily = usePluginData<DailyRow[]>("getDailyUsage", {
+  const { from, to } = useMemo(
+    () =>
+      mode === "month"
+        ? monthBounds(anchor)
+        : { from: customFrom, to: customTo },
+    [mode, anchor, customFrom, customTo],
+  );
+
+  const daily = usePluginData<DailyResponse>("getDailyUsage", {
     companyId,
     from,
     to,
   });
-  const monthly = usePluginData<MonthlyRow[]>("getMonthlySummary", {
+  const perModel = usePluginData<PerModelResponse>("getPerModelForRange", {
     companyId,
     from,
     to,
   });
-  const pricing = usePluginData<PricingConfig | null>("getPricing", {
-    companyId,
-  });
-  const costs = usePluginData<CostsOverview>("getCostsOverview", {
-    companyId,
-  });
-  const ingest = usePluginData<IngestStats>("getIngestStats", { companyId });
+  const pricing = usePluginData<unknown>("getPricing", { companyId });
 
-  const refresh = useCallback(() => {
-    daily.refresh();
-    monthly.refresh();
-    pricing.refresh();
-    costs.refresh();
-    ingest.refresh();
-  }, [daily, monthly, pricing, costs, ingest]);
+  const pricingConfig = useMemo(
+    () => normalizePricing(pricing.data),
+    [pricing.data],
+  );
+  const hasPricing = !!pricingConfig;
+
+  const dailyRows: DailyRow[] = useMemo(() => {
+    const d = daily.data;
+    // Tolerate the historical bare-array shape too, in case a caller swaps the
+    // worker out from under us. Never crash on a wrong-shape response.
+    if (Array.isArray(d)) return d as DailyRow[];
+    if (d && typeof d === "object" && Array.isArray((d as DailyResponse).rows)) {
+      return (d as DailyResponse).rows;
+    }
+    return [];
+  }, [daily.data]);
 
   const totals = useMemo(() => {
-    const rows = daily.data ?? [];
     let inp = 0;
     let out = 0;
     let billable = 0;
     let hasBillable = false;
-    for (const r of rows) {
-      inp += r.input_tokens;
-      out += r.output_tokens;
+    for (const r of dailyRows) {
+      inp += Number(r.input_tokens) || 0;
+      out += Number(r.output_tokens) || 0;
       if (typeof r.billable_usd === "number") {
         billable += r.billable_usd;
         hasBillable = true;
       }
     }
     return { inp, out, billable, hasBillable };
-  }, [daily.data]);
-
-  const hasPricing = !!pricing.data;
+  }, [dailyRows]);
 
   // Download the CSV by fetching it and triggering an anchor with the `download`
-  // attribute. This forces a real file save instead of inline rendering, which
-  // is what window.open() would do when the host's API layer drops or alters
-  // the worker's Content-Disposition header.
+  // attribute. This forces a real save instead of inline render, which is what
+  // window.open() does when the host's API layer drops Content-Disposition.
   const downloadCsv = useCallback(async () => {
-    if (downloading) return;
+    if (downloading || !companyId) return;
     setDownloading(true);
     const url = `/api/plugins/claude-token-usage/api/export/monthly.csv?companyId=${encodeURIComponent(
       companyId,
@@ -1022,9 +828,7 @@ export function UsagePage(): JSX.Element {
         credentials: "include",
         headers: { Accept: "text/csv" },
       });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       const csv = await res.text();
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
       blobUrl = URL.createObjectURL(blob);
@@ -1043,7 +847,6 @@ export function UsagePage(): JSX.Element {
         tone: "error",
       });
     } finally {
-      // Revoke after a tick so the browser has time to start the download.
       if (blobUrl) setTimeout(() => URL.revokeObjectURL(blobUrl!), 1000);
       setDownloading(false);
     }
@@ -1051,38 +854,33 @@ export function UsagePage(): JSX.Element {
 
   if (!companyId) {
     return (
-      <div className="tu-root" style={styles.page}><ThemeStyles />
+      <div className="tu-root" style={styles.page}>
+        <ThemeStyles />
         <div style={styles.empty}>
-          No company context available. Open this plugin from within a
-          Paperclip company.
+          No company context. Open this plugin from inside a Paperclip company.
         </div>
       </div>
     );
   }
 
+  const canStepForward = !isFutureMonth(nextMonth(anchor));
+  const isLoading = daily.loading || perModel.loading;
+
   return (
-    <div className="tu-root" style={styles.page}><ThemeStyles />
+    <div className="tu-root" style={styles.page}>
+      <ThemeStyles />
+
+      {/* Header */}
       <div style={styles.header}>
-        <h1 style={styles.title}>Token Usage</h1>
+        <div style={styles.headerLeft}>
+          <h1 style={styles.title}>Token Usage</h1>
+          <p style={styles.subtitle}>
+            Claude tokens consumed by this company. Used for client billing.
+          </p>
+        </div>
         <div style={styles.controls}>
-          <label style={styles.mutedLabel}>From</label>
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            style={styles.input}
-          />
-          <label style={styles.mutedLabel}>To</label>
-          <input
-            type="date"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            style={styles.input}
-          />
-          <button style={styles.btn} onClick={refresh}>
-            Refresh
-          </button>
           <button
+            type="button"
             style={styles.btnPrimary}
             onClick={downloadCsv}
             disabled={downloading}
@@ -1092,102 +890,153 @@ export function UsagePage(): JSX.Element {
         </div>
       </div>
 
-      <div style={styles.kpiRow}>
-        <div style={styles.kpi}>
-          <div style={styles.kpiLabel}>Input tokens</div>
-          <div style={styles.kpiValue}>{fmtInt(totals.inp)}</div>
-        </div>
-        <div style={styles.kpi}>
-          <div style={styles.kpiLabel}>Output tokens</div>
-          <div style={styles.kpiValue}>{fmtInt(totals.out)}</div>
-        </div>
-        <div style={styles.kpi}>
-          <div style={styles.kpiLabel}>Billable</div>
-          <div style={styles.kpiValue}>
-            {hasPricing && totals.hasBillable
-              ? fmtUsd(totals.billable)
-              : "—"}
-          </div>
-          {!hasPricing && (
-            <a {...settingsLinkProps} style={styles.link}>
-              Set pricing →
-            </a>
-          )}
-        </div>
+      {/* Time scope */}
+      <div style={styles.controls}>
+        {mode === "month" ? (
+          <>
+            <button
+              type="button"
+              aria-label="Previous month"
+              style={styles.btnIcon}
+              onClick={() => setAnchor(prevMonth(anchor))}
+            >
+              ◀
+            </button>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 600,
+                minWidth: 140,
+                textAlign: "center",
+              }}
+            >
+              {monthLabel(anchor)}
+            </div>
+            <button
+              type="button"
+              aria-label="Next month"
+              style={{
+                ...styles.btnIcon,
+                opacity: canStepForward ? 1 : 0.4,
+                cursor: canStepForward ? "pointer" : "not-allowed",
+              }}
+              onClick={() => canStepForward && setAnchor(nextMonth(anchor))}
+              disabled={!canStepForward}
+            >
+              ▶
+            </button>
+            <button
+              type="button"
+              style={styles.btnGhost}
+              onClick={() => setMode("custom")}
+            >
+              Custom range
+            </button>
+          </>
+        ) : (
+          <>
+            <label style={styles.mutedLabel}>From</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={customFrom}
+              onChange={(e) => setCustomFrom(e.target.value)}
+            />
+            <label style={styles.mutedLabel}>To</label>
+            <input
+              type="date"
+              style={styles.input}
+              value={customTo}
+              onChange={(e) => setCustomTo(e.target.value)}
+            />
+            <button
+              type="button"
+              style={styles.btnGhost}
+              onClick={() => setMode("month")}
+            >
+              ← Back to month view
+            </button>
+          </>
+        )}
       </div>
 
-      <CostsOverviewCard
-        costs={costs.data}
-        loading={costs.loading}
-        ingest={ingest.data}
+      {/* KPI row */}
+      <div style={styles.kpiRow}>
+        <KpiCard
+          label="Total tokens"
+          value={fmtTokens(totals.inp + totals.out)}
+          loading={isLoading}
+        />
+        <KpiCard
+          label="Input"
+          value={fmtTokens(totals.inp)}
+          loading={isLoading}
+        />
+        <KpiCard
+          label="Output"
+          value={fmtTokens(totals.out)}
+          loading={isLoading}
+        />
+        <KpiCard
+          label="Billable"
+          value={
+            hasPricing && totals.hasBillable ? fmtUsd(totals.billable) : "—"
+          }
+          loading={isLoading}
+          sub={
+            !hasPricing ? (
+              <a {...settingsLinkProps} style={styles.link}>
+                Set pricing →
+              </a>
+            ) : undefined
+          }
+        />
+      </div>
+
+      {/* By model */}
+      <PerModelCard
+        loading={perModel.loading}
+        rows={perModel.data?.rows ?? null}
+        priced={!!perModel.data?.priced}
+        settingsLinkProps={settingsLinkProps}
       />
 
-      <div style={styles.sectionTitle}>Daily</div>
-      {daily.loading ? (
-        <div style={styles.empty}>Loading…</div>
-      ) : (daily.data ?? []).length === 0 ? (
-        <div style={styles.empty}>No usage in this range.</div>
-      ) : (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Date</th>
-              <th style={styles.th}>Input tokens</th>
-              <th style={styles.th}>Output tokens</th>
-              {hasPricing && <th style={styles.th}>Billable</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {[...(daily.data ?? [])]
-              .sort((a, b) => (a.day < b.day ? 1 : -1))
-              .map((r) => (
-                <tr key={r.day}>
-                  <td style={styles.td}>{r.day}</td>
-                  <td style={styles.td}>{fmtInt(r.input_tokens)}</td>
-                  <td style={styles.td}>{fmtInt(r.output_tokens)}</td>
-                  {hasPricing && (
-                    <td style={styles.td}>{fmtUsd(r.billable_usd)}</td>
-                  )}
-                </tr>
-              ))}
-          </tbody>
-        </table>
-      )}
+      {/* Daily chart */}
+      <DailyChartCard
+        loading={daily.loading}
+        rows={dailyRows}
+        from={from}
+        to={to}
+      />
 
-      <div style={styles.sectionTitle}>Monthly rollup</div>
-      {monthly.loading ? (
-        <div style={styles.empty}>Loading…</div>
-      ) : (monthly.data ?? []).length === 0 ? (
-        <div style={styles.empty}>No monthly data in this range.</div>
-      ) : (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Month</th>
-              <th style={styles.th}>Days</th>
-              <th style={styles.th}>Input tokens</th>
-              <th style={styles.th}>Output tokens</th>
-              {hasPricing && <th style={styles.th}>Billable</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {(monthly.data ?? []).map((r) => (
-              <tr key={r.month}>
-                <td style={styles.td}>{r.month}</td>
-                <td style={styles.td}>{r.month_start} → {r.month_end}</td>
-                <td style={styles.td}>{fmtInt(r.input_tokens)}</td>
-                <td style={styles.td}>{fmtInt(r.output_tokens)}</td>
-                {hasPricing && (
-                  <td style={styles.td}>{fmtUsd(r.total_billed_usd)}</td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      {/* Pricing footer */}
+      <section style={{ ...styles.card, padding: "12px 16px" }}>
+        <div style={{ fontSize: 12, color: "var(--muted-foreground)" }}>
+          {hasPricing && pricingConfig ? (
+            <>
+              Pricing configured. Opus 4.8 $
+              {pricingConfig.pricing["opus-4-8"].input}/$
+              {pricingConfig.pricing["opus-4-8"].output} per 1M tokens; margin{" "}
+              {pricingConfig.margin.percent}%.{" "}
+              <a {...settingsLinkProps} style={styles.link}>
+                Edit rates →
+              </a>
+            </>
+          ) : (
+            <>
+              Pricing not configured.{" "}
+              <a {...settingsLinkProps} style={styles.link}>
+                Set pricing →
+              </a>{" "}
+              to enable billable totals and the monthly CSV cost columns.
+            </>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
+
 
 export function SettingsPage(): JSX.Element {
   const host = useHostContext();

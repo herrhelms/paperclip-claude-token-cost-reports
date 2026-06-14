@@ -209,8 +209,8 @@ describe("manifest", () => {
     expect(text).not.toMatch(/assets/);
   });
 
-  it("declares version 0.4.0 (per-agent breakdown)", () => {
-    expect(manifest.version).toBe("0.4.0");
+  it("declares version 0.4.1 (per-agent via host /api/costs)", () => {
+    expect(manifest.version).toBe("0.4.1");
   });
 
   it("routePath is a single-segment lowercase slug", () => {
