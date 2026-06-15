@@ -353,6 +353,32 @@ const THEME_CSS = `
 .tu-root input[type="date"] {
   color-scheme: light dark;
 }
+/*
+ * KPI grid breakpoints.
+ *
+ * The dashboard has 6 KPI cards (Total · Input · Output · Cost · Net · Price).
+ * Inline auto-fit with a fixed minmax would strand the 6th card on a half-empty
+ * second row at common widths. Explicit breakpoints keep the layout balanced:
+ *
+ *   ≥1400px  → 6 across (one row, widescreen monitors)
+ *   980–1399 → 3 × 2     (typical 13–15" laptop / split screen — user's target)
+ *   640–979  → 2 × 3     (narrow window, tablet portrait)
+ *   <640     → 1 column  (phone)
+ */
+.tu-kpi-row {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+@media (max-width: 1399.98px) {
+  .tu-kpi-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 979.98px) {
+  .tu-kpi-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 639.98px) {
+  .tu-kpi-row { grid-template-columns: minmax(0, 1fr); }
+}
 `;
 
 // Style tokens mapped to host CSS variables so the page tracks Paperclip's
@@ -476,12 +502,10 @@ const styles = {
     color: "var(--foreground)",
   } as React.CSSProperties,
 
-  // KPI grid
-  kpiRow: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-    gap: 12,
-  } as React.CSSProperties,
+  // KPI grid — column count is driven by the .tu-kpi-row media queries in
+  // THEME_CSS so the layout snaps to 6 / 3×2 / 2×3 / 1-col at clean breakpoints.
+  // Keep this block empty-but-present so existing call sites don't break.
+  kpiRow: {} as React.CSSProperties,
   kpi: {
     border: "1px solid var(--border)",
     borderRadius: 12,
@@ -813,15 +837,59 @@ function BillingConfigStrip(props: {
         </span>
       </div>
       <div style={cell}>
-        <span style={labelStyle}>Currency</span>
+        <span
+          style={{
+            ...labelStyle,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+          }}
+        >
+          Currency
+          {fxRate !== null && fxRate !== 1 && (fxDay || fxSource) ? (
+            <span
+              role="img"
+              aria-label={
+                "FX rate" +
+                (fxDay ? ` last fetched ${fxDay}` : "") +
+                (fxSource ? ` from ${fxSource}` : "")
+              }
+              title={
+                "Last fetched" +
+                (fxDay ? `: ${fxDay}` : ": unknown") +
+                (fxSource ? `\nSource: ${fxSource}` : "")
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                color: "var(--muted-foreground)",
+                cursor: "help",
+              }}
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4" />
+                <path d="M12 8h.01" />
+              </svg>
+            </span>
+          ) : null}
+        </span>
         <span style={valueStyle}>
           {currency}
           {fxRate !== null && fxRate !== 1 ? (
             <span style={{ color: "var(--muted-foreground)", fontSize: 12 }}>
               {" "}
               · 1 USD = {fxRate.toFixed(4)} {currency}
-              {fxDay ? ` (${fxDay})` : ""}
-              {fxSource ? ` · ${fxSource}` : ""}
             </span>
           ) : null}
         </span>
@@ -1815,7 +1883,7 @@ export function UsagePage(): JSX.Element {
           ? `List ÷ ${subDivisor} × (1 + ${marginPct}% margin)`
           : `Cost × (1 + ${marginPct}% margin)`;
         return (
-          <div style={styles.kpiRow}>
+          <div className="tu-kpi-row" style={styles.kpiRow}>
             <KpiCard
               label="Total tokens"
               value={fmtTokensPrecise(totals.inp + totals.out)}
