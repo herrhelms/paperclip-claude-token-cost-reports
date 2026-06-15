@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-06-16
+### Changed
+- Worker bundle no longer ships `@paperclipai/plugin-sdk` (now marked external in esbuild). `dist/worker.js` shrinks from 426 KB to 51 KB; published tarball drops from 211 KB to 34 KB.
+- `package.json` `files` array switched from directory globs to explicit `dist/**/*.js` + `dist/**/*.d.ts` so source maps stay local but aren't published (saves ~240 KB per install).
+### Added
+- "Naming" section in README documenting npm package name / in-app slug / DB-namespace-hash alignment, with a one-liner to regenerate the SHA-256 suffix for forks.
+- `docs/PRODUCTION-INSTALL-CHECKLIST.md` — eight-section verification flow for the first production install. Closes the path to GA: when every box is green, blocker #4 (state.get scope error watch-list) can be definitively closed.
+
 ## [1.0.0-rc.1] - 2026-06-16
 ### Changed
 - BREAKING: renamed `claude-token-usage` → `claude-token-cost-reports` (npm package, in-app slug, DB namespace). Existing installs must `paperclipai plugin uninstall claude-token-usage --force` before installing.

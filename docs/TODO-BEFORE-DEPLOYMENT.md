@@ -223,7 +223,20 @@ into the typecheck script:
 
 ## 🟢 Quality concerns — not blockers, worth tracking
 
-### 10. `dist/worker.js` is 416 KB unminified
+### ~~10. `dist/worker.js` is 416 KB unminified~~ — RESOLVED 2026-06-16
+
+Marked `@paperclipai/plugin-sdk` external in the worker esbuild config (was missing
+from `workerConfig.external` even though `manifestConfig` and `uiConfig` already
+had it). Result: `dist/worker.js` shrinks from 426 KB → 51 KB. The published
+tarball drops from 211 KB → 34 KB; unpacked size 1.1 MB → 141 KB after also
+switching `package.json.files` from a directory entry to explicit `dist/**/*.js`
++ `dist/**/*.d.ts` globs (so source maps stay local but don't ship).
+
+---
+
+### Original analysis (kept for posterity)
+
+### ~~10. dist/worker.js was 416 KB unminified~~
 
 Total `dist/` weighs 1.1 MB including source maps. Reasonable for a worker but
 tree-shaking is leaving plenty in. If the npm package is the install artifact,
@@ -238,7 +251,15 @@ this shows on the npm page.
 
 ---
 
-### 11. Namespace hash is hardcoded in migration SQL
+### ~~11. Namespace hash is hardcoded in migration SQL~~ — DOCUMENTED 2026-06-16
+
+Constraint now documented in the README "Naming" section with the regenerate-the-hash
+one-liner. Long-term SDK fix (a `${PLUGIN_NAMESPACE}` template variable) is still
+desirable but not blocking; forks have the procedure.
+
+---
+
+### Original analysis
 
 Every migration begins with:
 
@@ -277,7 +298,15 @@ surface. If the host scopes or removes that endpoint, the settings link breaks.
 
 ---
 
-### 13. Package name vs in-app slug split
+### ~~13. Package name vs in-app slug split~~ — RESOLVED 2026-06-16
+
+Post-rename, the npm package name (`claude-token-cost-reports`), the in-app slug
+(`claude-token-cost-reports`), and the namespace seed (same string, hashed) are
+all the same identifier. README "Naming" section documents the alignment.
+
+---
+
+### Original analysis
 
 `claude-token-cost-reports` (npm) vs `claude-token-cost-reports` (in-app key).
 Acceptable, but `npm install claude-token-cost-reports` doesn't match

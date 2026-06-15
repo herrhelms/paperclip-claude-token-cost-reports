@@ -129,6 +129,24 @@ The monthly CSV emits only `row.price` — operator-internal numbers (list cost,
 
 Standalone plugin package. Built against `@paperclipai/plugin-sdk`. TypeScript throughout; React + inline CSS for the UI (no Tailwind); esbuild for both the worker and the UI bundle.
 
+## Naming
+
+Three names refer to the same thing — keep them aligned across npm, the host, and the database:
+
+| Surface | Value | Where it's set |
+| --- | --- | --- |
+| npm package name | `claude-token-cost-reports` | `package.json` `name` |
+| In-app plugin key | `claude-token-cost-reports` | `src/manifest.ts` `id` |
+| Private DB namespace | `plugin_claude_token_cost_reports_c7ca204bbe` | derived by the host as `plugin_<slug-with-underscores>_<sha256(slug)[0:10]>` |
+
+The `c7ca204bbe` suffix is the first 10 hex characters of `sha256("claude-token-cost-reports")`. **Forks that rename the plugin must regenerate this suffix in every migration file** — the host computes the namespace from the slug at install time, and a stale suffix in the SQL makes every migration fail with "schema X does not exist". A one-liner to recompute:
+
+```bash
+node -e "console.log(require('crypto').createHash('sha256').update('your-new-slug').digest('hex').slice(0,10))"
+```
+
+Then `sed -i '' 's/plugin_claude_token_cost_reports_c7ca204bbe/plugin_<new_slug>_<new_hash>/g' migrations/*.sql`. Tests do not catch this — the SQL runs at host install time, not at plugin build time.
+
 ## Verification commands
 
 ```bash

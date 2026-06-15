@@ -10,7 +10,10 @@ const workerConfig = {
   target: "node22",
   outfile: "dist/worker.js",
   sourcemap: true,
-  external: ["react", "react-dom"],
+  // @paperclipai/plugin-sdk is provided by the host runtime; bundling it would
+  // (a) bloat the worker by ~300 KB and (b) risk a duplicate-instance bug if
+  // the SDK exposes any module-level state.
+  external: ["react", "react-dom", "@paperclipai/plugin-sdk"],
   logLevel: "info",
 };
 
