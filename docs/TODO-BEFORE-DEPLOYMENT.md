@@ -220,7 +220,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-### 9. `tsconfig.json` excludes the test file from typecheck
+### ~~9. `tsconfig.json` excludes the test file from typecheck~~ — RESOLVED 2026-06-16
 
 ```json
 "exclude": ["node_modules", "dist", "tests/**/*"]
