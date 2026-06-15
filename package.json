@@ -1,8 +1,7 @@
 {
   "name": "claude-token-cost-reports",
   "version": "0.9.2",
-  "description": "Track Claude token usage per Paperclip company, store daily rollups, render a dashboard, and export a weekly CSV for token-based billing. Pricing table covers Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5 with 1M-context variants.",
-  "private": true,
+  "description": "Track Claude token usage per Paperclip company, store daily rollups, render a dashboard, and export a monthly CSV for token-based billing. Pricing table covers Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5 with 1M-context variants.",
   "type": "module",
   "main": "dist/worker.js",
   "files": [
@@ -24,14 +23,14 @@
     "lint": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@paperclipai/plugin-sdk": "*"
+    "@paperclipai/plugin-sdk": "^2026.609.0"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@paperclipai/plugin-sdk": "*",
+    "@paperclipai/plugin-sdk": "^2026.609.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/node": "^22.9.0",
@@ -55,5 +54,5 @@
     "billing",
     "claude"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT"
 }
