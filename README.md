@@ -18,7 +18,6 @@ Designed for operators on a Claude Pro / Max subscription who want to translate 
   - Status chips for ingest health and FX staleness next to the title
 - Settings page at `/$COMPANY/company/settings/instance/plugins/<install-uuid>` lets you configure:
   - Per-model rates (USD per 1M input / output) for Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus the 1M-context variants
-  - Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20) — divides list-price cost before margin
   - Margin %
   - Billing currency (10 currencies), with "Refresh FX now" and a status line showing the active rate
   - Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20) — divides list-price cost before margin, so the chargeback column reflects what the operator actually pays. The List column is unchanged so subscription savings stay visible. See "Subscription mode" below.
