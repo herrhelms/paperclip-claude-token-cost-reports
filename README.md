@@ -87,7 +87,7 @@ Core-read tables (declared in manifest): `cost_events` — needed by the backfil
 
 ## API routes
 
-Mounted under `/api/plugins/claude-token-usage/api/*`:
+Mounted under `/api/plugins/claude-token-cost-reports/api/*`:
 
 - `GET /export/monthly.csv?companyId=...&from=...&to=...` — streams the client-facing monthly CSV.
 
