@@ -315,11 +315,22 @@ type FxStatusResponse = {
 };
 
 // Compact token formatter — matches the host /costs page's "39.6k tok" / "1.0M tok" style.
+// Used in tight inline contexts: per-model bar labels, per-agent rows, chart axis.
 function fmtTokens(n: number): string {
   if (!isFinite(n)) return "0";
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return n.toLocaleString();
+}
+
+// Precise token formatter for headline KPI cards where two decimals look
+// better next to the currency values (€627.40 reads next to 141.70M).
+function fmtTokensPrecise(n: number): string {
+  if (!isFinite(n)) return "0";
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${(n / 1_000).toFixed(2)}k`;
   return n.toLocaleString();
 }
 
@@ -1807,17 +1818,17 @@ export function UsagePage(): JSX.Element {
           <div style={styles.kpiRow}>
             <KpiCard
               label="Total tokens"
-              value={fmtTokens(totals.inp + totals.out)}
+              value={fmtTokensPrecise(totals.inp + totals.out)}
               loading={isLoading}
             />
             <KpiCard
               label="Input"
-              value={fmtTokens(totals.inp)}
+              value={fmtTokensPrecise(totals.inp)}
               loading={isLoading}
             />
             <KpiCard
               label="Output"
-              value={fmtTokens(totals.out)}
+              value={fmtTokensPrecise(totals.out)}
               loading={isLoading}
             />
             <KpiCard
