@@ -666,6 +666,7 @@ type DailyResponse = {
   currency?: CurrencyCode;
   fxRate?: number;
   fxDay?: string | null;
+  marginPercent?: number;
   rows: DailyRow[];
 };
 
@@ -1484,8 +1485,18 @@ export function UsagePage(): JSX.Element {
         price_native += r.billable_usd;
       }
     }
-    return { inp, out, cost_native, price_native, hasCost };
-  }, [dailyRows]);
+    // Net price = client price minus the margin uplift. This is what the
+    // operator actually owes Anthropic (list cost ÷ subscriptionDivisor) —
+    // the worker has already done that math for price_native, so backing
+    // out the margin gives us the post-divisor pre-margin number without
+    // having to re-multiply by the divisor on the client side. Falls back
+    // to cost_native when there's no margin to back out (subscription off
+    // + 0% margin → all three values match, which is correct).
+    const marginPercent = Number(daily.data?.marginPercent ?? 0) || 0;
+    const net_native =
+      marginPercent !== 0 ? price_native / (1 + marginPercent / 100) : price_native;
+    return { inp, out, cost_native, price_native, net_native, hasCost };
+  }, [dailyRows, daily.data?.marginPercent]);
 
   // Download the CSV by fetching it and triggering an anchor with the `download`
   // attribute. This forces a real save instead of inline render, which is what
@@ -1829,6 +1840,31 @@ export function UsagePage(): JSX.Element {
                       : "tokens × per-1M rate"}
                   </span>
                 )
+              }
+            />
+            <KpiCard
+              label={`Net (${currency})`}
+              value={
+                hasPricing && totals.hasCost
+                  ? fmtMoney(totals.net_native, currency)
+                  : "—"
+              }
+              loading={isLoading}
+              sub={
+                hasPricing ? (
+                  <span
+                    style={styles.kpiSub}
+                    title={
+                      subEnabled
+                        ? `List ÷ ${subDivisor} (no margin) — what you actually owe Anthropic`
+                        : "Cost without margin"
+                    }
+                  >
+                    {subEnabled
+                      ? `your subscription cost (÷${subDivisor})`
+                      : "before margin"}
+                  </span>
+                ) : undefined
               }
             />
             <KpiCard
