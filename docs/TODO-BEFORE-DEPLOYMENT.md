@@ -184,7 +184,7 @@ subsection under the Settings list.
 
 ---
 
-### 8. No `CHANGELOG.md`
+### ~~8. No `CHANGELOG.md`~~ — RESOLVED 2026-06-16
 
 9 minor versions, ~16 patches in development. Without a changelog, operators
 have no way to know what each version added. Critical for a billing plugin
