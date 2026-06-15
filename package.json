@@ -7,7 +7,9 @@
   "files": [
     "dist",
     "migrations",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "paperclipPlugin": {
     "manifest": "dist/manifest.js",
