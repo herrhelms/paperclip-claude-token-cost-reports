@@ -49,7 +49,7 @@ copyright holder + year.
 
 ---
 
-### 3. Duplicate migration prefix `002_`
+### ~~3. Duplicate migration prefix `002_`~~ — RESOLVED 2026-06-16
 
 ```
 migrations/
