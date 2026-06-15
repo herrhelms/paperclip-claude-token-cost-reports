@@ -85,30 +85,9 @@ Expect three entries: `001_init`, `002_costs_overview`, `003_fx_rates`.
 
 ---
 
-### 4. CLI `bridge:data` produces `state.get` scope errors after first call
+### ~~4. CLI `bridge:data` produces `state.get` scope errors after first call~~ — NOT REPRODUCIBLE 2026-06-16
 
-```
-API error 502: Plugin "…" is not allowed to perform "state.get":
-the worker referenced a missing, expired, or unknown invocation scope
-```
-
-After a fresh install the first call to a handler that reads `ctx.state`
-works; subsequent calls fail with the above. The UI keeps working because each
-render gets a fresh invocation scope, but:
-
-- Operators cannot debug a stuck install via CLI.
-- External tools polling the bridge break after the first request.
-- The contract between the worker and the host's invocation scope isn't being
-  held — either the SDK example we copied caches `ctx` improperly or the
-  worker needs to retry on `scope expired` errors.
-
-**Action**
-
-Root-cause before publishing. Minimal repro: `bridge:data` twice in a row
-against `getPricing` or `getFxStatus` immediately after install. Check whether
-the SDK has a documented pattern for re-establishing the scope. If this is a
-known limitation, document the operator workflow ("always restart the worker
-before debug bridge calls").
+After the rename + idempotent migration pass, this no longer reproduces on consecutive `bridge:data` calls. Suspected cause: orphan schema from a previous install was confusing the host's invocation-scope dispatcher; purging via --force then reinstalling onto idempotent migrations cleared it. Keep on the watch-list for one production-grade install before publish.
 
 ---
 
