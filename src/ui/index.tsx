@@ -1074,7 +1074,7 @@ function PerModelCard(props: {
         <h2 style={styles.sectionTitle}>By model</h2>
         <span style={styles.mutedLabel}>
           {props.priced
-            ? `Tokens · Cost → Price (${props.currency})`
+            ? `Tokens · List → Client price (${props.currency})`
             : "Tokens (Input · Output)"}
         </span>
       </div>
@@ -1158,14 +1158,14 @@ function PerAgentCard(props: {
   }
   const priced = !!d?.priced;
   const currency: CurrencyCode = (d?.currency ?? "USD") as CurrencyCode;
-  const subEnabled = !!d?.subscription?.enabled;
-  const subDivisor = d?.subscription?.divisor ?? 1;
-  // Column labels switch based on subscription state. When off, columns are
-  // "Cost" (list-price equivalent) and "Price" (Cost × margin). When on, the
-  // chargeback column reflects the divisor, so it's renamed "Sub-adjusted"
-  // and the raw column is renamed "List" so the math is obvious.
-  const costLabel = subEnabled ? "List" : "Cost";
-  const priceLabel = subEnabled ? `Sub-adjusted (÷${subDivisor})` : "Price";
+  // Stable column labels — same vocabulary as the KPI cards above so the
+  // operator can scan "List price → Client price" across the dashboard
+  // without re-learning headers when subscription is toggled. The middle
+  // "Your cost" value isn't shown per-row (it'd add a column and the totals
+  // strip already surfaces it); operators who need the math see it explicitly
+  // on the page header config strip.
+  const costLabel = "List";
+  const priceLabel = "Client price";
 
   const colHead: React.CSSProperties = {
     fontSize: 11,
@@ -1287,18 +1287,23 @@ function PerAgentCard(props: {
         </div>
       ) : (
         <div style={{ marginTop: 12, fontSize: 11, color: "var(--muted-foreground)" }}>
-          {subEnabled ? (
-            <>
-              <strong>{costLabel}</strong> = tokens × per-1M rate (full API list
-              price) · <strong>{priceLabel}</strong> = {costLabel} ÷ {subDivisor}{" "}
-              × (1 + margin {d?.marginPercent ?? 0}%)
-            </>
-          ) : (
-            <>
-              <strong>Cost</strong> = tokens × per-1M rate ·{" "}
-              <strong>Price</strong> = Cost × (1 + margin {d?.marginPercent ?? 0}%)
-            </>
-          )}
+          {(() => {
+            const subEnabled = !!d?.subscription?.enabled;
+            const subDivisor = d?.subscription?.divisor ?? 1;
+            return subEnabled ? (
+              <>
+                <strong>List</strong> = tokens × per-1M API rate ·{" "}
+                <strong>Client price</strong> = List ÷ {subDivisor} × (1 +
+                margin {d?.marginPercent ?? 0}%)
+              </>
+            ) : (
+              <>
+                <strong>List</strong> = tokens × per-1M API rate ·{" "}
+                <strong>Client price</strong> = List × (1 + margin{" "}
+                {d?.marginPercent ?? 0}%)
+              </>
+            );
+          })()}
           {d?.fxRate && d.fxRate !== 1
             ? `, converted at 1 USD = ${d.fxRate.toFixed(4)} ${currency} (${d.fxDay ?? "?"})`
             : ""}
@@ -1868,20 +1873,21 @@ export function UsagePage(): JSX.Element {
       />
 
       {(() => {
-        // Switch KPI labels and footnotes when subscription is active. "List"
-        // is the raw list-price equivalent (pre-margin, pre-divisor); the
-        // billable column matches the per-agent card's "Sub-adjusted" label.
+        // KPI labels are stable regardless of subscription/margin config — the
+        // label describes WHAT the number is, not which knobs produced it.
+        //   List price = tokens × per-1M API rate (no subscription, no margin)
+        //   Your cost  = list ÷ subscriptionDivisor (post-sub, pre-margin)
+        //   Client price = your cost × (1 + margin/100)
+        // When the operator runs without a subscription, "Your cost" = "List
+        // price" — that's correct and transparently signals the config.
         const subEnabled =
           (pricingConfig?.subscription?.preset ?? "off") !== "off";
         const subDivisor = pricingConfig?.subscription?.divisor ?? 1;
         const marginPct = pricingConfig?.margin?.percent ?? 0;
-        const listLabel = subEnabled ? "List" : "Cost";
-        const billableLabel = subEnabled
-          ? `Sub-adjusted (÷${subDivisor})`
-          : "Price";
-        const billableFormula = subEnabled
-          ? `List ÷ ${subDivisor} × (1 + ${marginPct}% margin)`
-          : `Cost × (1 + ${marginPct}% margin)`;
+        const yourCostFormula = subEnabled
+          ? `List ÷ ${subDivisor} (subscription discount applied)`
+          : "Equal to List — no subscription discount configured";
+        const clientPriceFormula = `Your cost × (1 + ${marginPct}% margin)`;
         return (
           <div className="tu-kpi-row" style={styles.kpiRow}>
             <KpiCard
@@ -1900,7 +1906,7 @@ export function UsagePage(): JSX.Element {
               loading={isLoading}
             />
             <KpiCard
-              label={`${listLabel} (${currency})`}
+              label={`List price (${currency})`}
               value={
                 hasPricing && totals.hasCost
                   ? fmtMoney(totals.cost_native, currency)
@@ -1913,16 +1919,17 @@ export function UsagePage(): JSX.Element {
                     Set pricing →
                   </a>
                 ) : (
-                  <span style={styles.kpiSub}>
-                    {subEnabled
-                      ? "raw API list price"
-                      : "tokens × per-1M rate"}
+                  <span
+                    style={styles.kpiSub}
+                    title="tokens × per-1M Anthropic API rate"
+                  >
+                    tokens × per-1M API rate
                   </span>
                 )
               }
             />
             <KpiCard
-              label={`Net (${currency})`}
+              label={`Your cost (${currency})`}
               value={
                 hasPricing && totals.hasCost
                   ? fmtMoney(totals.net_native, currency)
@@ -1931,23 +1938,16 @@ export function UsagePage(): JSX.Element {
               loading={isLoading}
               sub={
                 hasPricing ? (
-                  <span
-                    style={styles.kpiSub}
-                    title={
-                      subEnabled
-                        ? `List ÷ ${subDivisor} (no margin) — what you actually owe Anthropic`
-                        : "Cost without margin"
-                    }
-                  >
+                  <span style={styles.kpiSub} title={yourCostFormula}>
                     {subEnabled
-                      ? `your subscription cost (÷${subDivisor})`
-                      : "before margin"}
+                      ? `after subscription ÷${subDivisor}`
+                      : "no subscription discount"}
                   </span>
                 ) : undefined
               }
             />
             <KpiCard
-              label={`${billableLabel} (${currency})`}
+              label={`Client price (${currency})`}
               value={
                 hasPricing && totals.hasCost
                   ? fmtMoney(totals.price_native, currency)
@@ -1956,8 +1956,8 @@ export function UsagePage(): JSX.Element {
               loading={isLoading}
               sub={
                 hasPricing ? (
-                  <span style={styles.kpiSub} title={billableFormula}>
-                    client invoice · {billableFormula}
+                  <span style={styles.kpiSub} title={clientPriceFormula}>
+                    Your cost · +{marginPct}% margin
                   </span>
                 ) : undefined
               }
