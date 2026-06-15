@@ -163,7 +163,7 @@ Also update the version-list at the end to match what 0.9.2 ships.
 
 ---
 
-### 7. README is multiple chapters out of sync
+### ~~7. README is multiple chapters out of sync~~ — RESOLVED 2026-06-16
 
 - **Data model section** doesn't list `raw_model`, `provider`, `source`,
   `cached_input_tokens`, `cost_cents` — all added by `002_costs_overview.sql`

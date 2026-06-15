@@ -11,7 +11,7 @@ Designed for operators on a Claude Pro / Max subscription who want to translate 
 - Fetches a daily USD→target FX rate from `open.er-api.com` and stores one row per (day, currency) in `fx_rates`. Only fetches for currencies at least one company has configured.
 - Cleans up automatically when a company is archived (purges `usage_events`, `usage_daily`, `pricing_config`, currency state).
 - Dashboard page mounted at `/$COMPANY/tokens` shows:
-  - 5 KPI cards: total tokens, input, output, cost (pre-margin), client price (post-margin)
+  - 6 KPI cards: total tokens, input, output, list (pre-margin), net (subscription-adjusted), price (chargeback). Labels switch to "List" + "Sub-adjusted" when a subscription preset is active.
   - Per-model horizontal bar chart with native-currency cost and price
   - Per-agent table with totals + per-model breakdown, six columns (Runs / Input / Output / Cost / Price)
   - Daily volume column chart — input + output stacked, peak label
@@ -21,9 +21,27 @@ Designed for operators on a Claude Pro / Max subscription who want to translate 
   - Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20) — divides list-price cost before margin
   - Margin %
   - Billing currency (10 currencies), with "Refresh FX now" and a status line showing the active rate
+  - Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20) — divides list-price cost before margin, so the chargeback column reflects what the operator actually pays. The List column is unchanged so subscription savings stay visible. See "Subscription mode" below.
 - Client-facing monthly CSV: per-(month, model) rows with native-currency price, monthly subtotals when the export spans 2+ months. Filename includes the company slug and currency code.
 - One-click `Backfill from history` button (current period) and `Backfill all history` (since the company's first cost_event).
 - Inherits the host's Paperclip theme (light/dark, shadcn-style cards) by referencing host CSS variables directly.
+
+## Subscription mode
+
+The plugin computes two cost lanes per row:
+
+- **List** = `tokens × per-MTok rate` — what API billing would charge.
+- **Sub-adjusted** = `List ÷ divisor × (1 + margin)` — what the operator bills the client.
+
+The divisor comes from the Subscription preset in Settings:
+
+| Preset | Divisor | Use when |
+| --- | --- | --- |
+| Off | 1 | Client pays for raw API consumption |
+| Claude Pro | 5 | Operator covers usage with a Pro subscription |
+| Claude Max | 20 | Operator covers usage with a Max subscription |
+
+Switching modes never rewrites historical data — it's a render-time recompute. The dashboard's KPI labels and the per-agent table column headers update in place. The monthly CSV applies the divisor at row aggregation time so the exported invoice matches the dashboard total to the cent.
 
 ## Surface
 
@@ -52,12 +70,12 @@ Designed for operators on a Claude Pro / Max subscription who want to translate 
 
 Private SQL namespace via `ctx.db` (`plugin_claude_token_usage_<hash>`):
 
-- `usage_events(source_event_id PRIMARY KEY, company_id, agent_id, model, input_tokens, output_tokens, occurred_at, day TEXT)` — append-only event log.
+- `usage_events(source_event_id PRIMARY KEY, company_id, agent_id, model, raw_model, provider, source, input_tokens, output_tokens, cached_input_tokens, cost_cents, occurred_at, day TEXT)` — append-only event log. `raw_model` preserves the literal model id (`claude-opus-4-7[1m]`) while `model` holds the normalized key; `provider` and `source` (`api` / `subscription`) drive the cost split.
 - `usage_daily(company_id, day TEXT, model, input_tokens, output_tokens, PRIMARY KEY(company_id, day, model))` — rolled-up daily totals.
 - `pricing_config(company_id PRIMARY KEY, json TEXT)` — kept for historical compatibility; live pricing lives in `ctx.state`.
 - `fx_rates(day, currency, rate, source, fetched_at, PRIMARY KEY(day, currency))` — daily USD-base FX snapshots.
 
-Migrations: `migrations/001_init.sql`, `migrations/002_fx_rates.sql`.
+Migrations: `migrations/001_init.sql`, `migrations/002_costs_overview.sql`, `migrations/003_fx_rates.sql`.
 
 Core-read tables (declared in manifest): `cost_events` — needed by the backfill action.
 
