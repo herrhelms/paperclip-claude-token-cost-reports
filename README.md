@@ -1,95 +1,123 @@
 # Claude Token Usage
 
-Track Claude token usage per Paperclip company, accumulate a daily record, review it in a dashboard, and export a monthly CSV you can use to bill clients at a configurable token-based rate.
+Track Claude token usage per Paperclip company, accumulate a daily record, see who burned what across agents and models, and export a client-facing monthly invoice CSV in the currency you bill in.
 
-Designed for operators on a Claude Max 20x Pro plan who want to translate flat-rate consumption into a token-priced invoice.
+Designed for operators on a Claude Pro / Max subscription who want to translate flat-rate consumption into a token-priced client invoice — with daily FX snapshots, configurable margin, and a subscription divisor that reflects what you actually pay Anthropic.
 
 ## What it does
 
-- Subscribes to `cost_event.created` and `agent.run.finished` and writes one row per event into a private `usage_events` table (idempotent on `source_event_id`).
-- Runs a `*/15 * * * *` rollup job that recomputes `usage_daily` for each company.
-- Exposes a client-presentation `Token Usage` page per company with KPI cards (total / input / output / billable USD), a per-model horizontal bar chart, and a daily volume column chart for the selected period.
-- Defaults to the current calendar month, with a month stepper for prior months and a custom-range fallback for ad-hoc queries.
-- Exposes a `Token Usage Settings` page where you configure `$/1M input` and `$/1M output` rates per Claude model (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus the 1M-context variants) and a global margin %.
-- Exposes a scoped JSON route that streams a monthly billing CSV: `month, month_start, month_end, input_tokens, output_tokens, input_cost_usd, output_cost_usd, total_billed_usd`.
+- Subscribes to `cost_event.created` and `agent.run.finished` and writes one row per event into a private `usage_events` table. Keys are `cost_event:<id>` for cost events so the live subscription and `Backfill from history` action share a keyspace and dedupe idempotently.
+- Rolls up to `usage_daily` every 15 minutes per company.
+- Fetches a daily USD→target FX rate from `open.er-api.com` and stores one row per (day, currency) in `fx_rates`. Only fetches for currencies at least one company has configured.
+- Cleans up automatically when a company is archived (purges `usage_events`, `usage_daily`, `pricing_config`, currency state).
+- Dashboard page mounted at `/$COMPANY/tokens` shows:
+  - 5 KPI cards: total tokens, input, output, cost (pre-margin), client price (post-margin)
+  - Per-model horizontal bar chart with native-currency cost and price
+  - Per-agent table with totals + per-model breakdown, six columns (Runs / Input / Output / Cost / Price)
+  - Daily volume column chart — input + output stacked, peak label
+  - Status chips for ingest health and FX staleness next to the title
+- Settings page at `/$COMPANY/company/settings/instance/plugins/<install-uuid>` lets you configure:
+  - Per-model rates (USD per 1M input / output) for Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus the 1M-context variants
+  - Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20) — divides list-price cost before margin
+  - Margin %
+  - Billing currency (10 currencies), with "Refresh FX now" and a status line showing the active rate
+- Client-facing monthly CSV: per-(month, model) rows with native-currency price, monthly subtotals when the export spans 2+ months. Filename includes the company slug and currency code.
+- One-click `Backfill from history` button (current period) and `Backfill all history` (since the company's first cost_event).
 - Inherits the host's Paperclip theme (light/dark, shadcn-style cards) by referencing host CSS variables directly.
 
 ## Surface
 
 | Slot | Label | Route |
 | --- | --- | --- |
-| `page` | Token Usage | `/usage` |
-| `settingsPage` | Token Usage Settings | (settings) |
+| `page` | Token Usage | `/$COMPANY/tokens` |
+| `settingsPage` | Token Usage Settings | `/$COMPANY/company/settings/instance/plugins/<install-uuid>` |
 
 ## Capabilities
 
-- `events.subscribe`
-- `database.namespace.migrate`
-- `database.namespace.read`
-- `database.namespace.write`
-- `api.routes.register`
-- `ui.page.register`
-- `plugin.state.write`
-- `jobs.schedule`
+| Capability | Why it's declared |
+| --- | --- |
+| `events.subscribe` | Receive `cost_event.created`, `agent.run.finished`, `company.updated` |
+| `costs.read` | Gates delivery of `cost_event.created` |
+| `agents.read` | Resolve agent display names for the per-agent breakdown |
+| `companies.read` | Resolve company name for the CSV filename slug |
+| `database.namespace.migrate` / `.read` / `.write` | Private SQL namespace |
+| `plugin.state.read` / `.write` | Per-company pricing + currency config in `ctx.state` |
+| `jobs.schedule` | `rollup-daily` (15 min) and `fetch-fx-daily` (hourly) |
+| `api.routes.register` | Scoped CSV export route |
+| `ui.page.register` | Page slot |
+| `instance.settings.register` | Settings page slot |
+| `http.outbound` | Daily FX fetch from `open.er-api.com` |
 
 ## Data model
 
-Private SQL namespace via `ctx.db`:
+Private SQL namespace via `ctx.db` (`plugin_claude_token_usage_<hash>`):
 
 - `usage_events(source_event_id PRIMARY KEY, company_id, agent_id, model, input_tokens, output_tokens, occurred_at, day TEXT)` — append-only event log.
 - `usage_daily(company_id, day TEXT, model, input_tokens, output_tokens, PRIMARY KEY(company_id, day, model))` — rolled-up daily totals.
-- `pricing_config(company_id PRIMARY KEY, json TEXT)` — per-company rates and margin %, JSON-encoded for v1 simplicity.
+- `pricing_config(company_id PRIMARY KEY, json TEXT)` — kept for historical compatibility; live pricing lives in `ctx.state`.
+- `fx_rates(day, currency, rate, source, fetched_at, PRIMARY KEY(day, currency))` — daily USD-base FX snapshots.
 
-Migrations live in `migrations/001_init.sql`.
+Migrations: `migrations/001_init.sql`, `migrations/002_fx_rates.sql`.
 
-## Actions
+Core-read tables (declared in manifest): `cost_events` — needed by the backfill action.
 
-Called by the UI via `usePluginAction` / `usePluginData`:
+## Plugin state keys
 
-- `getDailyUsage({ companyId, from, to })` — daily rows for the dashboard table.
-- `getMonthlySummary({ companyId, from, to })` — calendar-month rollups, with `$` columns when pricing is set.
-- `getPricing({ companyId })` / `setPricing({ companyId, config })` — used by the settings page.
+- Company-scoped: `pricing-config` (rates + margin + subscription), `currency-config` (selected billing currency)
+- Instance-scoped: `active-currencies` (string[] — drives which currencies the daily fetcher requests)
+
+## Data handlers (registered on `ctx.data`)
+
+- `getDailyUsage({ companyId, from, to })` — daily rows with cost/price in USD and native currency. Drives the dashboard daily chart + KPIs.
+- `getMonthlySummary({ companyId, from, to })` — calendar-month rollups (legacy aggregate, kept for the API surface).
+- `getPerModelForRange({ companyId, from, to })` — per-model breakdown with cost → price in native currency.
+- `getPerAgentBreakdown({ companyId, from, to })` — per-agent + per-model with runs, tokens, cost, price.
+- `getPricing({ companyId })` — bare PricingConfig.
+- `getCurrencyConfig({ companyId })` — `{ currency, supported }`.
+- `getFxStatus({ companyId })` — current rate, day, source for the company's currency.
+- `getIngestStats({ companyId })` — total + 24h ingest counts for the dashboard health chip.
+
+## Actions (registered on `ctx.actions`)
+
+- `setPricing({ companyId, config })`
+- `setCurrencyConfig({ companyId, currency })` (best-effort prefetches FX)
+- `refreshFxNow({ companyId })`
+- `backfillFromCostEvents({ companyId, from, to })`
+- `backfillAllHistory({ companyId })`
 
 ## API routes
 
 Mounted under `/api/plugins/claude-token-usage/api/*`:
 
-- `GET /export/monthly.csv?companyId=...&from=...&to=...` — streams the monthly billing CSV. Cost columns are blank when no pricing is saved for the company.
+- `GET /export/monthly.csv?companyId=...&from=...&to=...` — streams the client-facing monthly CSV.
 
-## Configuration
+CSV columns: `period, month_start, month_end, model, input_tokens, output_tokens, total_tokens, currency, price`. Multi-month exports include a `model = TOTAL` row at the end of each month section. Filename: `usage-<company-slug>-<from>-<to>-<currency>.csv`.
 
-All configuration is set in the Settings page and persisted to `pricing_config`. No environment variables, no secrets.
-
-| Key | Description |
-| --- | --- |
-| `pricing.opus.input` | $/1M input tokens (seeded from current public Anthropic API rate) |
-| `pricing.opus.output` | $/1M output tokens for Opus |
-| `pricing.sonnet.input` | $/1M input tokens for Sonnet |
-| `pricing.sonnet.output` | $/1M output tokens for Sonnet |
-| `pricing.haiku.input` | $/1M input tokens for Haiku |
-| `pricing.haiku.output` | $/1M output tokens for Haiku |
-| `margin.percent` | Number, default `0` |
-
-Defaults are seeded from current public Anthropic API rates so you can sanity-check before editing.
-
-## How billing math works
+## Billing math
 
 For each event with model `m`, input tokens `i`, output tokens `o`:
 
 ```
-input_cost  = i / 1_000_000 * pricing[m].input
-output_cost = o / 1_000_000 * pricing[m].output
-billed      = (input_cost + output_cost) * (1 + margin.percent / 100)
+list_cost     = (i × pricing[m].input + o × pricing[m].output) / 1_000_000     # USD
+operator_cost = list_cost / subscriptionDivisor                                 # Pro÷5, Max÷20, Off÷1
+client_price  = operator_cost × (1 + margin.percent / 100)                      # USD
+row.price     = client_price × fx_rate(month_end_day, currency)                 # Native currency
 ```
 
-The monthly CSV sums these per calendar month (YYYY-MM, UTC). If a company has no saved pricing config, cost and billed columns are emitted blank — token columns still populate so you can review usage before pricing it.
+Dashboard KPI "Cost" shows `list_cost` summed in native currency (what an API user would pay at list price). KPI "Price" shows `row.price` summed (what the client owes after margin and currency conversion). The per-model and per-agent cards show both side by side, so reconciliation is explicit.
+
+The monthly CSV emits only `row.price` — operator-internal numbers (list cost, divisor, margin %) stay off the file you send to the client.
 
 ## Install target
 
-Standalone plugin package. Built against `@paperclipai/plugin-sdk`. TypeScript throughout; React + inline CSS for the UI (no Tailwind); esbuild for the worker bundle, rollup for the UI bundle.
+Standalone plugin package. Built against `@paperclipai/plugin-sdk`. TypeScript throughout; React + inline CSS for the UI (no Tailwind); esbuild for both the worker and the UI bundle.
 
-## Scope notes (v1)
+## Verification commands
 
-- No per-agent breakdown in the dashboard — operator confirmed it isn't needed.
-- Pricing is per-company and per-model. Margin is a single global %.
-- Re-delivered events are deduplicated by `source_event_id` primary key.
+```bash
+pnpm install
+pnpm typecheck
+pnpm test            # 33 unit tests on the pure math + manifest
+pnpm build
+paperclipai plugin install /absolute/path/to/this/folder
+```

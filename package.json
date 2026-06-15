@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-claude-token-usage",
-  "version": "0.7.0",
+  "version": "0.9.1",
   "description": "Track Claude token usage per Paperclip company, store daily rollups, render a dashboard, and export a weekly CSV for token-based billing. Pricing table covers Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5 with 1M-context variants.",
   "private": true,
   "type": "module",

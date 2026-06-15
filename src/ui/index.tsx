@@ -55,6 +55,41 @@ async function fetchInstallId(): Promise<string | null> {
   return installIdPromise;
 }
 
+// Resolve the active company's display name into a download-safe slug.
+// Hits /api/companies/:id same-origin under the board's session (no plugin
+// capability required — the host's REST is what the UI talks to anyway).
+// Mirrors the worker-side slugifyForFilename so server and client agree on
+// the filename written to Content-Disposition vs. <a download>.
+const slugByCompanyId = new Map<string, string | null>();
+function slugifyForFilename(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+async function fetchCompanySlug(companyId: string): Promise<string | null> {
+  if (slugByCompanyId.has(companyId)) return slugByCompanyId.get(companyId) ?? null;
+  try {
+    const res = await fetch(`/api/companies/${encodeURIComponent(companyId)}`, {
+      credentials: "include",
+    });
+    if (!res.ok) {
+      slugByCompanyId.set(companyId, null);
+      return null;
+    }
+    const c = (await res.json()) as { name?: string };
+    const slug = slugifyForFilename(c.name ?? "") || null;
+    slugByCompanyId.set(companyId, slug);
+    return slug;
+  } catch {
+    slugByCompanyId.set(companyId, null);
+    return null;
+  }
+}
+
 function useSettingsHref(): string {
   const [href, setHref] = useState<string>(
     cachedInstallId
@@ -683,6 +718,220 @@ type SettingsLinkProps = {
 
 // ---- Sub-components ----
 
+/**
+ * Always-visible billing-config strip. Renders the inputs that turn raw token
+ * counts into the billable total: period, currency + FX, margin, subscription
+ * preset. The point is auditability — anyone looking at the dashboard can
+ * defend the totals without opening Settings.
+ */
+function BillingConfigStrip(props: {
+  from: string;
+  to: string;
+  currency: CurrencyCode;
+  fxRate: number | null;
+  fxDay: string | null;
+  fxSource: string | null;
+  marginPercent: number | null;
+  subscription:
+    | { enabled: boolean; preset: SubscriptionPreset; divisor: number }
+    | null;
+  priced: boolean;
+  settingsLinkProps: SettingsLinkProps;
+}): JSX.Element {
+  const {
+    from,
+    to,
+    currency,
+    fxRate,
+    fxDay,
+    fxSource,
+    marginPercent,
+    subscription,
+    priced,
+    settingsLinkProps,
+  } = props;
+  const subLabel = subscription?.enabled
+    ? `${
+        subscription.preset === "max"
+          ? "Claude Max"
+          : subscription.preset === "pro"
+            ? "Claude Pro"
+            : `Custom`
+      } (÷${subscription.divisor})`
+    : "Off (full list price)";
+
+  const cell: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    minWidth: 0,
+  };
+  const labelStyle: React.CSSProperties = {
+    fontSize: 10,
+    color: "var(--muted-foreground)",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    fontWeight: 600,
+  };
+  const valueStyle: React.CSSProperties = {
+    fontSize: 13,
+    color: "var(--foreground)",
+    fontVariantNumeric: "tabular-nums",
+  };
+
+  return (
+    <section
+      style={{
+        border: "1px solid var(--border)",
+        background: "var(--muted)",
+        borderRadius: 6,
+        padding: "10px 14px",
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 24,
+        alignItems: "center",
+        margin: "16px 0",
+      }}
+      title="Inputs to the billable total. Edit in Settings."
+    >
+      <div style={cell}>
+        <span style={labelStyle}>Period</span>
+        <span style={valueStyle}>
+          {from} → {to}
+        </span>
+      </div>
+      <div style={cell}>
+        <span style={labelStyle}>Currency</span>
+        <span style={valueStyle}>
+          {currency}
+          {fxRate !== null && fxRate !== 1 ? (
+            <span style={{ color: "var(--muted-foreground)", fontSize: 12 }}>
+              {" "}
+              · 1 USD = {fxRate.toFixed(4)} {currency}
+              {fxDay ? ` (${fxDay})` : ""}
+              {fxSource ? ` · ${fxSource}` : ""}
+            </span>
+          ) : null}
+        </span>
+      </div>
+      <div style={cell}>
+        <span style={labelStyle}>Margin</span>
+        <span style={valueStyle}>
+          {priced ? `${(marginPercent ?? 0).toFixed(1)}%` : "—"}
+        </span>
+      </div>
+      <div style={cell}>
+        <span style={labelStyle}>Subscription</span>
+        <span style={valueStyle}>{subLabel}</span>
+      </div>
+      <div style={{ ...cell, marginLeft: "auto" }}>
+        <a {...settingsLinkProps} style={styles.link}>
+          Edit in Settings →
+        </a>
+      </div>
+    </section>
+  );
+}
+
+// Health chip showing how many cost_event.created rows have landed in the
+// last 24h. Three states: healthy (>=1 in 24h), idle (0 in 24h but total > 0),
+// blank (no events ever). The blank state is mostly for fresh installs and
+// links to the Backfill button at the bottom of the chip's tooltip.
+type IngestStatsResponse = {
+  asOf: string;
+  totalEvents: number;
+  last24hEvents: number;
+  lastEventAt: string | null;
+  hasCostsReadCapability?: boolean;
+  diagnosticHint?: string | null;
+};
+function IngestStatsChip(props: {
+  data: IngestStatsResponse | undefined | null;
+}): JSX.Element | null {
+  const d = props.data;
+  if (!d) return null;
+  const idle = d.last24hEvents === 0 && d.totalEvents > 0;
+  const noEvents = d.totalEvents === 0;
+  const stripe = noEvents
+    ? "var(--muted-foreground)"
+    : idle
+      ? "var(--destructive)"
+      : "var(--primary)";
+  const bg = noEvents
+    ? "color-mix(in oklab, var(--muted-foreground) 12%, transparent)"
+    : idle
+      ? "color-mix(in oklab, var(--destructive) 12%, transparent)"
+      : "color-mix(in oklab, var(--primary) 12%, transparent)";
+  const label = noEvents
+    ? "No events yet"
+    : idle
+      ? "Idle — 0 events in 24h"
+      : `${d.last24hEvents} events in 24h`;
+  const tooltipBits = [
+    `Lifetime events ingested: ${d.totalEvents}`,
+    d.lastEventAt ? `Last event: ${d.lastEventAt.slice(0, 19).replace("T", " ")}Z` : "Never seen an event",
+    "Events arrive via the cost_event.created subscription. If this stays at 0 while agents are running, the host may not be granting costs.read or the adapter isn't emitting cost events.",
+  ];
+  return (
+    <span
+      title={tooltipBits.join("\n")}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 8px",
+        border: `1px solid ${stripe}`,
+        borderRadius: 999,
+        background: bg,
+        color: stripe,
+        fontSize: 11,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+// Small status chip that surfaces a stale FX rate. Hidden for USD (identity,
+// no FX to be stale) and when fxDay is within 1 day of today. Otherwise shows
+// "FX from N days ago" so the operator knows their prices reflect an older
+// exchange rate — typically a sign the hourly fetch job has been failing.
+function FxStalenessChip(props: {
+  fxDay: string | null | undefined;
+  currency: CurrencyCode;
+}): JSX.Element | null {
+  if (props.currency === "USD") return null;
+  if (!props.fxDay) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const t1 = Date.parse(props.fxDay + "T00:00:00Z");
+  const t2 = Date.parse(today + "T00:00:00Z");
+  if (!isFinite(t1) || !isFinite(t2)) return null;
+  const days = Math.floor((t2 - t1) / 86400000);
+  if (days <= 1) return null;
+  return (
+    <span
+      title={`FX rate stored on ${props.fxDay}. The daily fetch job runs hourly — if this keeps growing, check the worker logs for fetch-fx-daily failures.`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 8px",
+        border: "1px solid var(--destructive)",
+        borderRadius: 999,
+        background: "color-mix(in oklab, var(--destructive) 12%, transparent)",
+        color: "var(--destructive)",
+        fontSize: 11,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      FX rate {days}d old
+    </span>
+  );
+}
+
 function KpiCard(props: {
   label: string;
   value: string;
@@ -997,18 +1246,27 @@ function DailyChartCard(props: {
   }
   // Build a dense day-by-day series from `from` to `to`, filling zero where the
   // rollup table has no row. Iterating bounded by `to` ensures we don't draw a
-  // gap when usage only landed on some days.
-  const byDay = new Map<string, number>();
+  // gap when usage only landed on some days. Input and output are tracked
+  // separately so we can draw a stacked column (output on top, input below).
+  const byDay = new Map<string, { input: number; output: number }>();
   for (const r of props.rows) {
-    const total = (Number(r.input_tokens) || 0) + (Number(r.output_tokens) || 0);
-    byDay.set(r.day, (byDay.get(r.day) ?? 0) + total);
+    const inp = Number(r.input_tokens) || 0;
+    const out = Number(r.output_tokens) || 0;
+    const existing = byDay.get(r.day);
+    if (existing) {
+      existing.input += inp;
+      existing.output += out;
+    } else {
+      byDay.set(r.day, { input: inp, output: out });
+    }
   }
-  const days: { day: string; total: number }[] = [];
+  const days: { day: string; input: number; output: number; total: number }[] = [];
   const cursor = new Date(props.from + "T00:00:00Z");
   const end = new Date(props.to + "T00:00:00Z");
   while (cursor.getTime() <= end.getTime() && days.length < 366) {
     const day = cursor.toISOString().slice(0, 10);
-    days.push({ day, total: byDay.get(day) ?? 0 });
+    const split = byDay.get(day) ?? { input: 0, output: 0 };
+    days.push({ day, input: split.input, output: split.output, total: split.input + split.output });
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   const totalsZero = days.every((d) => d.total === 0);
@@ -1034,6 +1292,35 @@ function DailyChartCard(props: {
       <div style={styles.cardHeader}>
         <h2 style={styles.sectionTitle}>Daily volume</h2>
         <span style={styles.mutedLabel}>
+          <span
+            style={{
+              display: "inline-block",
+              width: 8,
+              height: 8,
+              background: "var(--primary)",
+              opacity: 0.45,
+              borderRadius: 2,
+              marginRight: 4,
+              verticalAlign: "middle",
+            }}
+            aria-hidden
+          />
+          input
+          <span style={{ marginInline: 6 }}>·</span>
+          <span
+            style={{
+              display: "inline-block",
+              width: 8,
+              height: 8,
+              background: "var(--primary)",
+              borderRadius: 2,
+              marginRight: 4,
+              verticalAlign: "middle",
+            }}
+            aria-hidden
+          />
+          output
+          <span style={{ marginInline: 6 }}>·</span>
           peak {fmtTokens(maxTotal)} tok/day
         </span>
       </div>
@@ -1042,26 +1329,52 @@ function DailyChartCard(props: {
         preserveAspectRatio="none"
         style={{ width: "100%", height: 120, display: "block" }}
         role="img"
-        aria-label="Daily token volume across the selected period"
+        aria-label="Daily token volume (input + output) across the selected period"
       >
         {days.map((d, i) => {
           if (d.total <= 0) return null;
-          const h = Math.max(2, (d.total / maxTotal) * (H - 4));
+          // Total column height proportional to that day's total tokens, with
+          // a 2px floor so days with tiny activity still register visually.
+          const colH = Math.max(2, (d.total / maxTotal) * (H - 4));
+          // Output sits on top (full opacity); input is the base (45%).
+          // Compute each segment's height from the share of total tokens.
+          const outShare = d.total > 0 ? d.output / d.total : 0;
+          const outH = colH * outShare;
+          const inpH = colH - outH;
           const x = i * (colW + gap);
-          const y = H - h;
+          const inpY = H - inpH;
+          const outY = H - colH;
+          const r = Math.min(1.5, colW / 2);
           return (
-            <rect
-              key={d.day}
-              x={x}
-              y={y}
-              width={colW}
-              height={h}
-              rx={Math.min(1.5, colW / 2)}
-              ry={Math.min(1.5, colW / 2)}
-              fill="var(--primary)"
-            >
-              <title>{`${d.day}: ${fmtInt(d.total)} tokens`}</title>
-            </rect>
+            <g key={d.day}>
+              {inpH > 0 ? (
+                <rect
+                  x={x}
+                  y={inpY}
+                  width={colW}
+                  height={inpH}
+                  rx={r}
+                  ry={r}
+                  fill="var(--primary)"
+                  opacity={0.45}
+                >
+                  <title>{`${d.day}: ${fmtInt(d.input)} input · ${fmtInt(d.output)} output (${fmtInt(d.total)} total)`}</title>
+                </rect>
+              ) : null}
+              {outH > 0 ? (
+                <rect
+                  x={x}
+                  y={outY}
+                  width={colW}
+                  height={outH}
+                  rx={r}
+                  ry={r}
+                  fill="var(--primary)"
+                >
+                  <title>{`${d.day}: ${fmtInt(d.input)} input · ${fmtInt(d.output)} output (${fmtInt(d.total)} total)`}</title>
+                </rect>
+              ) : null}
+            </g>
           );
         })}
       </svg>
@@ -1098,6 +1411,7 @@ export function UsagePage(): JSX.Element {
   const [backfilling, setBackfilling] = useState(false);
 
   const backfillFromCostEvents = usePluginAction("backfillFromCostEvents");
+  const backfillAllAction = usePluginAction("backfillAllHistory");
 
   const { from, to } = useMemo(
     () =>
@@ -1123,6 +1437,7 @@ export function UsagePage(): JSX.Element {
     to,
   });
   const pricing = usePluginData<unknown>("getPricing", { companyId });
+  const ingestStats = usePluginData<IngestStatsResponse>("getIngestStats", { companyId });
 
   const pricingConfig = useMemo(
     () => normalizePricing(pricing.data),
@@ -1181,10 +1496,12 @@ export function UsagePage(): JSX.Element {
     const url = `/api/plugins/claude-token-usage/api/export/monthly.csv?companyId=${encodeURIComponent(
       companyId,
     )}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
-    // Filename suffix mirrors the worker's Content-Disposition: include the
-    // currency code so multi-currency exports for the same period don't clobber
-    // each other on disk.
-    const filename = `usage-${companyId}-${from}-${to}-${currency}.csv`;
+    // Filename mirrors the worker's Content-Disposition: company slug,
+    // period, currency code. The browser ignores the server header when we
+    // download a blob URL, so we resolve the slug here too. fetchCompanySlug
+    // hits /api/companies/:id same-origin (board session) and caches.
+    const companySlug = (await fetchCompanySlug(companyId)) ?? companyId;
+    const filename = `usage-${companySlug}-${from}-${to}-${currency}.csv`;
     let blobUrl: string | null = null;
     try {
       const res = await fetch(url, {
@@ -1192,7 +1509,22 @@ export function UsagePage(): JSX.Element {
         headers: { Accept: "text/csv" },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      const csv = await res.text();
+      // The host wraps plugin api responses in JSON regardless of the
+      // worker's Content-Type header, so what comes back is a JSON-quoted
+      // string of the CSV (literal "\\n", surrounding quotes, etc.).
+      // Unwrap when we detect that shape so the downloaded file is the
+      // real CSV — newlines, no quotes, no escape sequences. Falls back to
+      // the raw text when parsing doesn't produce a string.
+      const raw = await res.text();
+      let csv = raw;
+      if (raw.length > 0 && raw[0] === '"') {
+        try {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed === "string") csv = parsed;
+        } catch {
+          /* leave csv as raw */
+        }
+      }
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
       blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1247,6 +1579,49 @@ export function UsagePage(): JSX.Element {
     }
   }, [backfillFromCostEvents, backfilling, companyId, daily, from, perAgent, perModel, to, toast]);
 
+  // Backfill all history: ask the worker to find the earliest cost_event for
+  // this company and ingest from there to today. Asks for confirmation first
+  // because the scan can take a minute on large histories.
+  const runBackfillAll = useCallback(async () => {
+    if (backfilling || !companyId) return;
+    const ok = window.confirm(
+      "This will scan every cost_event for this company since the very first one and ingest anything missing. Continue?",
+    );
+    if (!ok) return;
+    setBackfilling(true);
+    try {
+      const result = (await backfillAllAction({ companyId })) as {
+        scanned: number;
+        inserted: number;
+        daysRolledUp: number;
+        from: string | null;
+        to: string | null;
+        message?: string;
+      };
+      if (result.message) {
+        toast?.({ title: "Nothing to backfill", body: result.message, tone: "success" });
+      } else {
+        toast?.({
+          title: "Full backfill complete",
+          body: `${result.inserted} new events ingested · ${result.daysRolledUp} day(s) re-rolled-up · range ${result.from} → ${result.to}`,
+          tone: "success",
+        });
+      }
+      daily.refresh();
+      perModel.refresh();
+      perAgent.refresh();
+      ingestStats.refresh();
+    } catch (err) {
+      toast?.({
+        title: "Full backfill failed",
+        body: String(err instanceof Error ? err.message : err),
+        tone: "error",
+      });
+    } finally {
+      setBackfilling(false);
+    }
+  }, [backfillAllAction, backfilling, companyId, daily, ingestStats, perAgent, perModel, toast]);
+
   if (!companyId) {
     return (
       <div className="tu-root" style={styles.page}>
@@ -1268,7 +1643,11 @@ export function UsagePage(): JSX.Element {
       {/* Header */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
-          <h1 style={styles.title}>Token Usage</h1>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+            <h1 style={styles.title}>Token Usage</h1>
+            <IngestStatsChip data={ingestStats.data} />
+            <FxStalenessChip fxDay={daily.data?.fxDay} currency={currency} />
+          </div>
           <p style={styles.subtitle}>
             Claude tokens consumed by this company. Used for client billing.
           </p>
@@ -1353,7 +1732,7 @@ export function UsagePage(): JSX.Element {
             </button>
           </>
         )}
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <button
             type="button"
             style={styles.btn}
@@ -1361,61 +1740,116 @@ export function UsagePage(): JSX.Element {
             disabled={backfilling}
             title="Scan the host's cost_events table for this period and ingest anything missing"
           >
-            {backfilling ? "Backfilling…" : "Backfill from history"}
+            {backfilling ? "Backfilling…" : "Backfill this period"}
+          </button>
+          <button
+            type="button"
+            style={styles.btnGhost}
+            onClick={runBackfillAll}
+            disabled={backfilling}
+            title="Scan since the earliest cost_event for this company and ingest anything missing"
+          >
+            Backfill all history
           </button>
         </div>
       </div>
 
       {/* KPI row */}
-      <div style={styles.kpiRow}>
-        <KpiCard
-          label="Total tokens"
-          value={fmtTokens(totals.inp + totals.out)}
-          loading={isLoading}
-        />
-        <KpiCard
-          label="Input"
-          value={fmtTokens(totals.inp)}
-          loading={isLoading}
-        />
-        <KpiCard
-          label="Output"
-          value={fmtTokens(totals.out)}
-          loading={isLoading}
-        />
-        <KpiCard
-          label={`Cost (${currency})`}
-          value={
-            hasPricing && totals.hasCost
-              ? fmtMoney(totals.cost_native, currency)
-              : "—"
-          }
-          loading={isLoading}
-          sub={
-            !hasPricing ? (
-              <a {...settingsLinkProps} style={styles.link}>
-                Set pricing →
-              </a>
-            ) : (
-              <span style={styles.kpiSub}>before margin</span>
-            )
-          }
-        />
-        <KpiCard
-          label={`Price (${currency})`}
-          value={
-            hasPricing && totals.hasCost
-              ? fmtMoney(totals.price_native, currency)
-              : "—"
-          }
-          loading={isLoading}
-          sub={
-            hasPricing ? (
-              <span style={styles.kpiSub}>client invoice</span>
-            ) : undefined
-          }
-        />
-      </div>
+      {/* Always-visible audit strip — period · currency · margin · subscription. */}
+      <BillingConfigStrip
+        from={from}
+        to={to}
+        currency={currency}
+        fxRate={perAgent.data?.fxRate ?? perModel.data?.fxRate ?? daily.data?.fxRate ?? null}
+        fxDay={perAgent.data?.fxDay ?? perModel.data?.fxDay ?? daily.data?.fxDay ?? null}
+        fxSource={perAgent.data?.fxSource ?? perModel.data?.fxSource ?? null}
+        marginPercent={pricingConfig?.margin?.percent ?? perAgent.data?.marginPercent ?? null}
+        subscription={
+          pricingConfig?.subscription
+            ? {
+                enabled: pricingConfig.subscription.preset !== "off",
+                preset: pricingConfig.subscription.preset,
+                divisor: pricingConfig.subscription.divisor,
+              }
+            : perAgent.data?.subscription ?? null
+        }
+        priced={hasPricing}
+        settingsLinkProps={settingsLinkProps}
+      />
+
+      {(() => {
+        // Switch KPI labels and footnotes when subscription is active. "List"
+        // is the raw list-price equivalent (pre-margin, pre-divisor); the
+        // billable column matches the per-agent card's "Sub-adjusted" label.
+        const subEnabled =
+          (pricingConfig?.subscription?.preset ?? "off") !== "off";
+        const subDivisor = pricingConfig?.subscription?.divisor ?? 1;
+        const marginPct = pricingConfig?.margin?.percent ?? 0;
+        const listLabel = subEnabled ? "List" : "Cost";
+        const billableLabel = subEnabled
+          ? `Sub-adjusted (÷${subDivisor})`
+          : "Price";
+        const billableFormula = subEnabled
+          ? `List ÷ ${subDivisor} × (1 + ${marginPct}% margin)`
+          : `Cost × (1 + ${marginPct}% margin)`;
+        return (
+          <div style={styles.kpiRow}>
+            <KpiCard
+              label="Total tokens"
+              value={fmtTokens(totals.inp + totals.out)}
+              loading={isLoading}
+            />
+            <KpiCard
+              label="Input"
+              value={fmtTokens(totals.inp)}
+              loading={isLoading}
+            />
+            <KpiCard
+              label="Output"
+              value={fmtTokens(totals.out)}
+              loading={isLoading}
+            />
+            <KpiCard
+              label={`${listLabel} (${currency})`}
+              value={
+                hasPricing && totals.hasCost
+                  ? fmtMoney(totals.cost_native, currency)
+                  : "—"
+              }
+              loading={isLoading}
+              sub={
+                !hasPricing ? (
+                  <a {...settingsLinkProps} style={styles.link}>
+                    Set pricing →
+                  </a>
+                ) : (
+                  <span style={styles.kpiSub}>
+                    {subEnabled
+                      ? "raw API list price"
+                      : "tokens × per-1M rate"}
+                  </span>
+                )
+              }
+            />
+            <KpiCard
+              label={`${billableLabel} (${currency})`}
+              value={
+                hasPricing && totals.hasCost
+                  ? fmtMoney(totals.price_native, currency)
+                  : "—"
+              }
+              loading={isLoading}
+              sub={
+                hasPricing ? (
+                  <span style={styles.kpiSub} title={billableFormula}>
+                    client invoice · {billableFormula}
+                  </span>
+                ) : undefined
+              }
+            />
+          </div>
+        );
+      })()}
 
       {/* By model */}
       <PerModelCard

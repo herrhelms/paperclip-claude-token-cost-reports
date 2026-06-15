@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "claude-token-usage",
   apiVersion: 1,
-  version: "0.8.0",
+  version: "0.9.1",
   displayName: "Claude Token Usage",
   description:
     "Track Claude token usage per company, accumulate daily totals, and export a monthly CSV priced at configurable per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M context variants). The dashboard is mounted at the host's company-scoped plugin page (open from the company sidebar) and per-company pricing is configured here in the plugin settings.",
@@ -32,6 +32,10 @@ const manifest: PaperclipPluginManifestV1 = {
     // (which agent burned which tokens) — required for future per-agent rollups
     // and already useful in logs.
     "agents.read",
+    // companies.read lets the CSV exporter look up the company's display name
+    // so the downloaded filename is "usage-acme-corp-…csv" instead of the
+    // opaque UUID. Falls back silently when the capability is denied.
+    "companies.read",
     // http.outbound is needed by the daily FX-rate job: it GETs
     // https://open.er-api.com/v6/latest/USD and parses the {rates} map so the
     // dashboard can convert per-1M USD costs to the operator's chosen

@@ -68,7 +68,7 @@ export interface PricingConfig {
   };
 }
 
-function subscriptionDivisor(cfg: PricingConfig | null | undefined): number {
+export function subscriptionDivisor(cfg: PricingConfig | null | undefined): number {
   const sub = cfg?.subscription;
   if (!sub) return 1;
   if (sub.preset === "off") return 1;
@@ -166,7 +166,7 @@ function pricingScope(companyId: string) {
   };
 }
 
-function isPricingConfig(v: unknown): v is PricingConfig {
+export function isPricingConfig(v: unknown): v is PricingConfig {
   if (!v || typeof v !== "object") return false;
   const c = v as Record<string, unknown>;
   const p = c.pricing as Record<string, unknown> | undefined;
@@ -193,7 +193,7 @@ function isPricingConfig(v: unknown): v is PricingConfig {
 
 // Upgrade older persisted configs (pre-0.2.0) to the new keyed shape, preserving
 // any operator-set values where possible. Anything we can't map falls back to defaults.
-function upgradePricingConfig(raw: unknown): PricingConfig {
+export function upgradePricingConfig(raw: unknown): PricingConfig {
   const out: PricingConfig = JSON.parse(JSON.stringify(DEFAULT_PRICING));
   if (!raw || typeof raw !== "object") return out;
   const c = raw as Record<string, unknown>;
@@ -475,7 +475,7 @@ async function ensureTodaysFxRates(ctx: PluginContext): Promise<{
   return { fetched: true, day, written, skipped };
 }
 
-function priceFor(
+export function priceFor(
   model: ModelKey,
   input: number,
   output: number,
@@ -518,13 +518,121 @@ async function rollupCompanyDay(ctx: PluginContext, companyId: string, day: stri
   }
 }
 
+// Backfill helper used by both backfillFromCostEvents (explicit range) and
+// backfillAllHistory (since-first-event). Read public.cost_events for the
+// range, ingest each row into usage_events with source_event_id
+// `cost_event:<id>` (ON CONFLICT DO NOTHING), then rollup every affected
+// day. Returns a summary of how many rows landed.
+async function runBackfill(
+  ctx: PluginContext,
+  companyId: string,
+  from: string,
+  to: string,
+): Promise<{
+  scanned: number;
+  inserted: number;
+  daysRolledUp: number;
+  days: string[];
+}> {
+  const fromIso = `${from}T00:00:00Z`;
+  const toIso = `${to}T23:59:59.999Z`;
+
+  type Row = {
+    id: string;
+    company_id: string;
+    agent_id: string | null;
+    model: string;
+    input_tokens: number | string | null;
+    cached_input_tokens: number | string | null;
+    output_tokens: number | string | null;
+    occurred_at: string;
+  };
+
+  const rows = await ctx.db.query<Row>(
+    `SELECT id::text             AS id,
+            company_id::text     AS company_id,
+            agent_id::text       AS agent_id,
+            model,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            occurred_at::text    AS occurred_at
+       FROM public.cost_events
+      WHERE company_id = $1::uuid
+        AND occurred_at >= $2::timestamptz
+        AND occurred_at <= $3::timestamptz`,
+    [companyId, fromIso, toIso],
+  );
+
+  let inserted = 0;
+  const affectedDays = new Set<string>();
+
+  for (const r of rows) {
+    const inp = Number(r.input_tokens) || 0;
+    const cached = Number(r.cached_input_tokens) || 0;
+    const out = Number(r.output_tokens) || 0;
+    if (!inp && !cached && !out) continue;
+    const day = String(r.occurred_at).slice(0, 10);
+    const result = await ctx.db.execute(
+      `INSERT INTO ${q(ctx, "usage_events")}
+         (source_event_id, company_id, agent_id, model, input_tokens, output_tokens, occurred_at, day)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (source_event_id) DO NOTHING`,
+      [
+        `cost_event:${r.id}`,
+        r.company_id,
+        r.agent_id,
+        normalizeModel(r.model),
+        inp + cached,
+        out,
+        r.occurred_at,
+        day,
+      ],
+    );
+    if (result.rowCount > 0) inserted++;
+    affectedDays.add(day);
+  }
+
+  for (const day of affectedDays) {
+    await rollupCompanyDay(ctx, companyId, day);
+  }
+
+  ctx.logger.info("backfill complete", {
+    companyId,
+    from,
+    to,
+    scanned: rows.length,
+    inserted,
+    daysRolledUp: affectedDays.size,
+  });
+  return {
+    scanned: rows.length,
+    inserted,
+    daysRolledUp: affectedDays.size,
+    days: Array.from(affectedDays).sort(),
+  };
+}
+
 async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void> {
   const e = event as unknown as Record<string, unknown>;
   const payload = (event.payload ?? {}) as Record<string, unknown>;
 
-  const sourceEventId = String(
-    e.eventId ?? (e as { id?: string }).id ?? payload.eventId ?? payload.id ?? "",
-  );
+  // Cost events get keyed by the cost_event row id ("cost_event:<id>") so
+  // backfillFromCostEvents and live subscription land in the same keyspace —
+  // a backfill window that overlaps the live ingest is a no-op via ON
+  // CONFLICT DO NOTHING rather than double-counting. agent.run.finished
+  // doesn't have a cost_event id, so it falls through to the PluginEvent
+  // UUID (eventId) which the original ingestor used.
+  const eventType = String(e.eventType ?? "");
+  const costEventId =
+    eventType === "cost_event.created"
+      ? String(payload.id ?? payload.eventId ?? "")
+      : "";
+  const sourceEventId = costEventId
+    ? `cost_event:${costEventId}`
+    : String(
+        e.eventId ?? (e as { id?: string }).id ?? payload.eventId ?? payload.id ?? "",
+      );
   const companyId = String(e.companyId ?? payload.companyId ?? payload.company_id ?? "");
   const occurredAt = String(
     e.occurredAt ??
@@ -710,6 +818,20 @@ async function readDaily(
   );
 }
 
+// Slugify a free-text company name into something safe for a download
+// filename: ASCII letters/digits/hyphens, no leading/trailing hyphens,
+// capped at 40 chars. Returns "" when nothing survives (caller falls back
+// to the UUID).
+export function slugifyForFilename(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
 // Display labels for the CSV — match the UI's MODEL_LABELS so the client's
 // spreadsheet reads "Opus 4.7[1m]" instead of the internal "opus-4-7-1m".
 const CSV_MODEL_LABELS: Record<string, string> = {
@@ -805,28 +927,101 @@ async function buildClientMonthlyCsv(
   const header =
     "period,month_start,month_end,model,input_tokens,output_tokens,total_tokens,currency,price";
 
-  const lines = rows.map((b) => {
+  // Build per-row strings and accumulate per-month subtotals as we go. When
+  // the export spans 2+ months we emit a "TOTAL" row after each month's
+  // last per-model row so the client can read the monthly bill at a glance
+  // without pivoting. Single-month exports skip subtotals — the one row
+  // (or rows) IS the bill.
+  const distinctMonths = new Set(rows.map((r) => r.month));
+  const multiMonth = distinctMonths.size >= 2;
+
+  type Subtotal = {
+    month: string;
+    month_start: string;
+    month_end: string;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    price: number | null;
+  };
+  const subtotalByMonth = new Map<string, Subtotal>();
+  const lines: string[] = [];
+
+  for (const b of rows) {
     const total = b.input_tokens + b.output_tokens;
     const fxRate = fxByMonth.get(b.month_end) ?? 1;
     const priceNative = pricing
       ? b.cost_usd * (1 + margin) * fxRate
       : null;
     const modelLabel = CSV_MODEL_LABELS[b.model] ?? b.model;
-    return [
-      b.month,
-      b.month_start,
-      b.month_end,
-      modelLabel,
-      b.input_tokens,
-      b.output_tokens,
-      total,
-      currencyCfg.currency,
-      priceNative === null ? "" : priceNative.toFixed(2),
-    ].join(",");
-  });
+    lines.push(
+      [
+        b.month,
+        b.month_start,
+        b.month_end,
+        modelLabel,
+        b.input_tokens,
+        b.output_tokens,
+        total,
+        currencyCfg.currency,
+        priceNative === null ? "" : priceNative.toFixed(2),
+      ].join(","),
+    );
+    if (multiMonth) {
+      let s = subtotalByMonth.get(b.month);
+      if (!s) {
+        s = {
+          month: b.month,
+          month_start: b.month_start,
+          month_end: b.month_end,
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          price: pricing ? 0 : null,
+        };
+        subtotalByMonth.set(b.month, s);
+      }
+      s.input_tokens += b.input_tokens;
+      s.output_tokens += b.output_tokens;
+      s.total_tokens += total;
+      if (s.price !== null && priceNative !== null) s.price += priceNative;
+    }
+  }
+
+  // Interleave the subtotal row after the last row of each month — scan the
+  // emitted lines and inject TOTAL rows at month boundaries.
+  let finalLines = lines;
+  if (multiMonth) {
+    const withSubtotals: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      withSubtotals.push(lines[i]);
+      const thisMonth = rows[i].month;
+      const nextMonth = i + 1 < rows.length ? rows[i + 1].month : null;
+      const isLastOfMonth = thisMonth !== nextMonth;
+      if (isLastOfMonth) {
+        const s = subtotalByMonth.get(thisMonth);
+        if (s) {
+          withSubtotals.push(
+            [
+              s.month,
+              s.month_start,
+              s.month_end,
+              "TOTAL",
+              s.input_tokens,
+              s.output_tokens,
+              s.total_tokens,
+              currencyCfg.currency,
+              s.price === null ? "" : s.price.toFixed(2),
+            ].join(","),
+          );
+        }
+      }
+    }
+    finalLines = withSubtotals;
+  }
 
   return {
-    csv: [header, ...lines].join("\n") + "\n",
+    csv: [header, ...finalLines].join("\n") + "\n",
     currency: currencyCfg.currency,
   };
 }
@@ -1197,6 +1392,51 @@ const plugin = definePlugin({
 
     ctx.events.on("agent.run.finished", async (event) => {
       await ingestEvent(ctx, event);
+    });
+
+    // Cleanup hook: when a company's status flips to "archived" we purge its
+    // rows from usage_events, usage_daily, pricing_config, and the
+    // company-scoped state so we don't keep stale references after the
+    // operator removes the company. Idempotent — re-firing on subsequent
+    // company.updated events just DELETEs zero rows.
+    ctx.events.on("company.updated", async (event) => {
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const status = String(payload.status ?? "").toLowerCase();
+      if (status !== "archived") return;
+      const companyId = String(event.companyId ?? payload.id ?? "");
+      if (!companyId) return;
+      try {
+        const ev = await ctx.db.execute(
+          `DELETE FROM ${q(ctx, "usage_events")} WHERE company_id = $1`,
+          [companyId],
+        );
+        const da = await ctx.db.execute(
+          `DELETE FROM ${q(ctx, "usage_daily")} WHERE company_id = $1`,
+          [companyId],
+        );
+        const pc = await ctx.db.execute(
+          `DELETE FROM ${q(ctx, "pricing_config")} WHERE company_id = $1`,
+          [companyId],
+        );
+        // Best-effort state cleanup. Failures here are logged but not fatal —
+        // the SQL rows are gone, which is the larger footprint.
+        try {
+          await ctx.state.delete(currencyScope(companyId));
+        } catch {
+          /* tolerate */
+        }
+        ctx.logger.info("archived company purged", {
+          companyId,
+          usageEvents: ev.rowCount,
+          usageDaily: da.rowCount,
+          pricingConfig: pc.rowCount,
+        });
+      } catch (err) {
+        ctx.logger.warn("archived company cleanup failed", {
+          companyId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     });
 
     ctx.jobs.register("rollup-daily", async (job) => {
@@ -1772,85 +2012,38 @@ const plugin = definePlugin({
       const from = String(params.from ?? "");
       const to = String(params.to ?? "");
       if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
-      // Range is inclusive of the to-date. Use a half-open window in the SQL
-      // so a row with occurred_at=23:59:59 on `to` still lands inside.
-      const fromIso = `${from}T00:00:00Z`;
-      const toIso = `${to}T23:59:59.999Z`;
+      return runBackfill(ctx, companyId, from, to);
+    });
 
-      type Row = {
-        id: string;
-        company_id: string;
-        agent_id: string | null;
-        model: string;
-        input_tokens: number | string | null;
-        cached_input_tokens: number | string | null;
-        output_tokens: number | string | null;
-        occurred_at: string;
-      };
-
-      const rows = await ctx.db.query<Row>(
-        `SELECT id::text             AS id,
-                company_id::text     AS company_id,
-                agent_id::text       AS agent_id,
-                model,
-                input_tokens,
-                cached_input_tokens,
-                output_tokens,
-                occurred_at::text    AS occurred_at
+    // Backfill from the company's earliest recorded cost_event to today.
+    // Convenience wrapper around runBackfill that finds MIN(occurred_at) first.
+    // Useful right after install when you want a single click that catches
+    // up *everything* without picking dates.
+    ctx.actions.register("backfillAllHistory", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const [minRow] = await ctx.db.query<{ occurred_at: string | null }>(
+        `SELECT MIN(occurred_at)::text AS occurred_at
            FROM public.cost_events
-          WHERE company_id = $1::uuid
-            AND occurred_at >= $2::timestamptz
-            AND occurred_at <= $3::timestamptz`,
-        [companyId, fromIso, toIso],
+          WHERE company_id = $1::uuid`,
+        [companyId],
       );
-
-      let inserted = 0;
-      const affectedDays = new Set<string>();
-
-      for (const r of rows) {
-        const inp = Number(r.input_tokens) || 0;
-        const cached = Number(r.cached_input_tokens) || 0;
-        const out = Number(r.output_tokens) || 0;
-        if (!inp && !cached && !out) continue;
-        const day = String(r.occurred_at).slice(0, 10);
-        const result = await ctx.db.execute(
-          `INSERT INTO ${q(ctx, "usage_events")}
-             (source_event_id, company_id, agent_id, model, input_tokens, output_tokens, occurred_at, day)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           ON CONFLICT (source_event_id) DO NOTHING`,
-          [
-            `cost_event:${r.id}`,
-            r.company_id,
-            r.agent_id,
-            normalizeModel(r.model),
-            inp + cached,
-            out,
-            r.occurred_at,
-            day,
-          ],
-        );
-        if (result.rowCount > 0) inserted++;
-        affectedDays.add(day);
+      const earliest = minRow?.occurred_at;
+      if (!earliest) {
+        return {
+          scanned: 0,
+          inserted: 0,
+          daysRolledUp: 0,
+          days: [] as string[],
+          from: null,
+          to: null,
+          message: "No cost events found for this company.",
+        };
       }
-
-      for (const day of affectedDays) {
-        await rollupCompanyDay(ctx, companyId, day);
-      }
-
-      ctx.logger.info("backfill complete", {
-        companyId,
-        from,
-        to,
-        scanned: rows.length,
-        inserted,
-        daysRolledUp: affectedDays.size,
-      });
-      return {
-        scanned: rows.length,
-        inserted,
-        daysRolledUp: affectedDays.size,
-        days: Array.from(affectedDays).sort(),
-      };
+      const from = earliest.slice(0, 10);
+      const to = new Date().toISOString().slice(0, 10);
+      const result = await runBackfill(ctx, companyId, from, to);
+      return { ...result, from, to };
     });
   },
 
@@ -1875,10 +2068,23 @@ const plugin = definePlugin({
     }
     if (!ctx) return { status: 500, body: { error: "worker not initialized" } };
     const { csv, currency } = await buildClientMonthlyCsv(ctx, companyId, from, to);
-    // Filename surfaces the currency code so the operator can keep multi-period
-    // exports straight at a glance, and re-running for a different currency
-    // doesn't overwrite the previous file.
-    const filename = `usage-${companyId}-${from}-${to}-${currency}.csv`;
+    // Resolve a human-readable company slug for the filename. Falls back to
+    // the company UUID if the lookup fails or the name doesn't slugify to
+    // anything safe — clients shouldn't have to read UUIDs.
+    let companySlug = companyId;
+    try {
+      const company = await ctx.companies.get(companyId);
+      const slug = slugifyForFilename(company?.name ?? "");
+      if (slug) companySlug = slug;
+    } catch (err) {
+      ctx.logger.warn("CSV company name lookup failed; falling back to UUID", {
+        companyId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Filename surfaces the company slug + currency code so the operator can
+    // keep multi-period and multi-currency exports straight at a glance.
+    const filename = `usage-${companySlug}-${from}-${to}-${currency}.csv`;
     return {
       status: 200,
       headers: {

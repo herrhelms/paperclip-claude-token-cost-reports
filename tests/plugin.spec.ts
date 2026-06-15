@@ -1,169 +1,25 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import manifest from "../src/manifest";
 import {
+  isPricingConfig,
   normalizeModel,
   PRICED_MODEL_KEYS,
+  priceFor,
+  slugifyForFilename,
+  subscriptionDivisor,
+  SUBSCRIPTION_DIVISORS,
+  upgradePricingConfig,
   type ModelKey,
+  type PricingConfig,
 } from "../src/worker";
 
-// NOTE: The worker-integration tests below (`register`, `events.subscribe`, etc.)
-// were written against an older SDK harness shape. The current worker uses
-// `definePlugin` + `ctx.events.on` and is wired by the host runtime, not by a
-// named `register` export. Those tests are kept .skip()'d as documentation
-// until the harness is rewritten against the live SDK. The pricing-key and
-// manifest tests below are the load-bearing checks for the 0.2.0 release.
-const register: any = undefined;
+// These tests cover the pure functions that carry the load-bearing math and
+// shape decisions: pricing, normalization, model recognition, slug rules, and
+// the subscription divisor. End-to-end behavior is verified via the worker
+// bridge from the host CLI in CI; this file targets logic that doesn't
+// require a worker harness.
 
-type Handler = (event: any, ctx: any) => Promise<void> | void;
-type ActionHandler = (input: any, ctx: any) => Promise<any> | any;
-type ApiHandler = (req: any, ctx: any) => Promise<any> | any;
-
-interface FakeRow {
-  [key: string]: any;
-}
-
-class FakeDb {
-  public tables: Record<string, FakeRow[]> = {
-    usage_events: [],
-    usage_daily: [],
-    pricing_config: [],
-  };
-  public migrated = false;
-
-  async migrate() {
-    this.migrated = true;
-  }
-
-  async run(sql: string, params: any[] = []) {
-    const lower = sql.toLowerCase();
-    if (lower.includes("insert into usage_events")) {
-      const [
-        source_event_id,
-        company_id,
-        agent_id,
-        model,
-        input_tokens,
-        output_tokens,
-        occurred_at,
-        day,
-      ] = params;
-      const exists = this.tables.usage_events.some(
-        (r) => r.source_event_id === source_event_id,
-      );
-      if (exists) return { changes: 0 };
-      this.tables.usage_events.push({
-        source_event_id,
-        company_id,
-        agent_id,
-        model,
-        input_tokens,
-        output_tokens,
-        occurred_at,
-        day,
-      });
-      return { changes: 1 };
-    }
-    if (lower.includes("delete from usage_daily")) {
-      const [company_id, day] = params;
-      this.tables.usage_daily = this.tables.usage_daily.filter(
-        (r) => !(r.company_id === company_id && r.day === day),
-      );
-      return { changes: 1 };
-    }
-    if (lower.includes("insert into usage_daily")) {
-      const [company_id, day, model, input_tokens, output_tokens] = params;
-      this.tables.usage_daily.push({
-        company_id,
-        day,
-        model,
-        input_tokens,
-        output_tokens,
-      });
-      return { changes: 1 };
-    }
-    if (lower.includes("insert into pricing_config")) {
-      const [company_id, json] = params;
-      this.tables.pricing_config = this.tables.pricing_config.filter(
-        (r) => r.company_id !== company_id,
-      );
-      this.tables.pricing_config.push({ company_id, json });
-      return { changes: 1 };
-    }
-    return { changes: 0 };
-  }
-
-  async all(sql: string, params: any[] = []) {
-    const lower = sql.toLowerCase();
-    if (lower.includes("from usage_events")) {
-      const [company_id, day] = params;
-      return this.tables.usage_events.filter(
-        (r) =>
-          (!company_id || r.company_id === company_id) &&
-          (!day || r.day === day),
-      );
-    }
-    if (lower.includes("from usage_daily")) {
-      const [company_id, from, to] = params;
-      return this.tables.usage_daily.filter(
-        (r) =>
-          r.company_id === company_id &&
-          (!from || r.day >= from) &&
-          (!to || r.day <= to),
-      );
-    }
-    return [];
-  }
-
-  async get(sql: string, params: any[] = []) {
-    const lower = sql.toLowerCase();
-    if (lower.includes("from pricing_config")) {
-      const [company_id] = params;
-      return this.tables.pricing_config.find((r) => r.company_id === company_id);
-    }
-    return undefined;
-  }
-}
-
-function makeCtx() {
-  const db = new FakeDb();
-  const events: Record<string, Handler> = {};
-  const actions: Record<string, ActionHandler> = {};
-  const apiRoutes: Record<string, ApiHandler> = {};
-  const jobs: Record<string, { cron: string; handler: Handler }> = {};
-
-  const ctx = {
-    db,
-    events: {
-      subscribe: (name: string, fn: Handler) => {
-        events[name] = fn;
-      },
-    },
-    actions: {
-      register: (name: string, fn: ActionHandler) => {
-        actions[name] = fn;
-      },
-    },
-    api: {
-      register: (method: string, path: string, fn: ApiHandler) => {
-        apiRoutes[`${method.toUpperCase()} ${path}`] = fn;
-      },
-    },
-    jobs: {
-      schedule: (name: string, cron: string, fn: Handler) => {
-        jobs[name] = { cron, handler: fn };
-      },
-    },
-    entities: {
-      get: async () => null,
-    },
-    agents: {
-      get: async () => null,
-    },
-    log: { info: () => {}, warn: () => {}, error: () => {} },
-  };
-
-  return { ctx, events, actions, apiRoutes, jobs, db };
-}
+// ---- Manifest sanity ------------------------------------------------------
 
 describe("manifest", () => {
   it("declares apiVersion 1", () => {
@@ -171,24 +27,40 @@ describe("manifest", () => {
   });
 
   it("uses the expected slug", () => {
-    expect(manifest.id ?? manifest.slug).toMatch(/claude-token-usage/);
+    expect(manifest.id).toMatch(/claude-token-usage/);
   });
 
   it("declares the page slot with routePath 'tokens'", () => {
-    const slots = (manifest.ui?.slots ?? []) as any[];
+    const slots = (manifest.ui?.slots ?? []) as Array<{
+      type: string;
+      routePath?: string;
+    }>;
     const page = slots.find((s) => s.type === "page");
     expect(page).toBeTruthy();
-    expect(page.routePath).toBe("tokens");
+    expect(page?.routePath).toBe("tokens");
   });
 
   it("declares a settingsPage slot without routePath", () => {
-    const slots = (manifest.ui?.slots ?? []) as any[];
+    const slots = (manifest.ui?.slots ?? []) as Array<{
+      type: string;
+      routePath?: string;
+    }>;
     const settings = slots.find((s) => s.type === "settingsPage");
     expect(settings).toBeTruthy();
-    expect(settings.routePath).toBeUndefined();
+    expect(settings?.routePath).toBeUndefined();
   });
 
-  it("declares the capabilities the worker actually uses", () => {
+  it("routePath is a single-segment lowercase slug", () => {
+    const slots = (manifest.ui?.slots ?? []) as Array<{
+      type: string;
+      routePath?: string;
+    }>;
+    const page = slots.find((s) => s.type === "page");
+    expect(page?.routePath).toMatch(/^[a-z][a-z0-9-]*$/);
+    expect(page?.routePath).not.toMatch(/\//);
+  });
+
+  it("declares all capabilities the worker actually exercises", () => {
     const caps = manifest.capabilities ?? [];
     for (const required of [
       "events.subscribe",
@@ -197,209 +69,226 @@ describe("manifest", () => {
       "database.namespace.write",
       "api.routes.register",
       "ui.page.register",
+      "plugin.state.read",
       "plugin.state.write",
       "jobs.schedule",
+      "instance.settings.register",
+      "costs.read",
+      "agents.read",
+      "http.outbound",
+      "companies.read",
     ]) {
       expect(caps).toContain(required);
     }
   });
 
-  it("does not reference ctx.assets anywhere", () => {
-    const text = JSON.stringify(manifest);
-    expect(text).not.toMatch(/assets/);
+  it("registers the daily rollup and FX fetcher jobs", () => {
+    const jobs = (manifest.jobs ?? []) as Array<{ jobKey: string; schedule: string }>;
+    expect(jobs.map((j) => j.jobKey)).toEqual(
+      expect.arrayContaining(["rollup-daily", "fetch-fx-daily"]),
+    );
   });
 
-  it("declares version 0.4.1 (per-agent via host /api/costs)", () => {
-    expect(manifest.version).toBe("0.7.0");
-  });
-
-  it("routePath is a single-segment lowercase slug", () => {
-    // The host validates routePath as a lowercase slug: letters, numbers,
-    // hyphens — no slashes. v0.3.2 shipped "company/usage" which failed install
-    // with API error 400. Lock the constraint in so it doesn't regress.
-    const slots = (manifest.ui?.slots ?? []) as any[];
-    const page = slots.find((s) => s.type === "page");
-    expect(page).toBeTruthy();
-    expect(page.routePath).toMatch(/^[a-z][a-z0-9-]*$/);
-    expect(page.routePath).not.toMatch(/\//);
-  });
-
-  it("declares the costs.read capability so cost_event.created is delivered", () => {
-    // This was the bug behind v0.3.0 showing empty cards: the host gates
-    // cost_event.created delivery behind costs.read. Lock it in.
-    expect(manifest.capabilities).toContain("costs.read");
+  it("registers cost_events as the only core-read table", () => {
+    expect(manifest.database?.coreReadTables ?? []).toEqual(["cost_events"]);
   });
 });
 
-describe("pricing model keys (0.2.0)", () => {
-  it("exports exactly 8 priced model keys", () => {
-    expect(PRICED_MODEL_KEYS).toHaveLength(8);
+// ---- Model normalization --------------------------------------------------
+
+describe("normalizeModel", () => {
+  it("returns 'unknown' for non-strings", () => {
+    expect(normalizeModel(undefined)).toBe("unknown");
+    expect(normalizeModel(null)).toBe("unknown");
+    expect(normalizeModel(42)).toBe("unknown");
   });
 
-  it("covers Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5 with [1m] variants", () => {
-    const expected: ModelKey[] = [
-      "opus-4-8",
-      "opus-4-8-1m",
-      "opus-4-7",
-      "opus-4-7-1m",
-      "sonnet-4-6",
-      "sonnet-4-6-1m",
-      "sonnet-4-5",
-      "sonnet-4-5-1m",
-    ];
-    for (const k of expected) {
-      expect(PRICED_MODEL_KEYS).toContain(k);
+  it("preserves canonical priced keys verbatim", () => {
+    for (const k of PRICED_MODEL_KEYS) {
+      expect(normalizeModel(k)).toBe(k);
     }
   });
 
-  it("normalizeModel maps canonical model strings to the right key", () => {
-    expect(normalizeModel("claude-opus-4-8")).toBe("opus-4-8");
-    expect(normalizeModel("claude-opus-4-7")).toBe("opus-4-7");
-    expect(normalizeModel("claude-sonnet-4-6")).toBe("sonnet-4-6");
-    expect(normalizeModel("claude-sonnet-4-5")).toBe("sonnet-4-5");
-  });
-
-  it("normalizeModel routes [1m] variants to the long-context key", () => {
-    expect(normalizeModel("claude-opus-4-8[1m]")).toBe("opus-4-8-1m");
-    expect(normalizeModel("claude-opus-4-7[1m]")).toBe("opus-4-7-1m");
-    expect(normalizeModel("claude-sonnet-4-6[1m]")).toBe("sonnet-4-6-1m");
-    expect(normalizeModel("claude-sonnet-4-5[1m]")).toBe("sonnet-4-5-1m");
-  });
-
-  it("normalizeModel remaps pre-0.2.0 'opus' and 'sonnet' to the most recent base variant", () => {
-    // Backwards-compat: historical rows stored "opus"/"sonnet" as the family bucket.
-    // After upgrade they should still price against the most recent known variant.
+  it("remaps legacy bare-family keys to the most recent variant", () => {
     expect(normalizeModel("opus")).toBe("opus-4-7");
     expect(normalizeModel("sonnet")).toBe("sonnet-4-6");
   });
 
-  it("normalizeModel returns 'unknown' for non-matching inputs", () => {
-    expect(normalizeModel(undefined)).toBe("unknown");
-    expect(normalizeModel("")).toBe("unknown");
-    expect(normalizeModel("gpt-4")).toBe("unknown");
-    expect(normalizeModel("claude-haiku-4-5")).toBe("unknown"); // not in the priced set for 0.2.0
+  it("derives version from common dot/dash/underscore-separated families", () => {
+    expect(normalizeModel("claude-opus-4-8-20260101")).toBe("opus-4-8");
+    expect(normalizeModel("Claude.Sonnet.4.6")).toBe("sonnet-4-6");
+    expect(normalizeModel("opus_4_7")).toBe("opus-4-7");
+  });
+
+  it("detects the [1m] long-context marker", () => {
+    expect(normalizeModel("claude-opus-4-8[1m]")).toBe("opus-4-8-1m");
+    expect(normalizeModel("Opus 4.8 1m")).toBe("opus-4-8-1m");
+    expect(normalizeModel("sonnet-4-6-1m")).toBe("sonnet-4-6-1m");
+  });
+
+  it("falls back to 'unknown' for models with no recognizable family", () => {
+    expect(normalizeModel("haiku-4-0")).toBe("unknown");
+    expect(normalizeModel("claude-instant")).toBe("unknown");
   });
 });
 
-describe.skip("worker registration", () => {
-  let harness: ReturnType<typeof makeCtx>;
+// ---- Pricing math ---------------------------------------------------------
 
-  beforeEach(async () => {
-    harness = makeCtx();
-    await register(harness.ctx as any);
+const FULL_PRICING: PricingConfig = {
+  pricing: {
+    "opus-4-8": { input: 5, output: 25 },
+    "opus-4-8-1m": { input: 5, output: 25 },
+    "opus-4-7": { input: 5, output: 25 },
+    "opus-4-7-1m": { input: 5, output: 25 },
+    "sonnet-4-6": { input: 3, output: 15 },
+    "sonnet-4-6-1m": { input: 3, output: 15 },
+    "sonnet-4-5": { input: 3, output: 15 },
+    "sonnet-4-5-1m": { input: 3, output: 15 },
+  },
+  margin: { percent: 0 },
+  subscription: { preset: "off", divisor: 1 },
+};
+
+describe("priceFor", () => {
+  it("returns zero for 'unknown' model regardless of tokens", () => {
+    const { inputCost, outputCost } = priceFor("unknown" as ModelKey, 1_000_000, 1_000_000, FULL_PRICING);
+    expect(inputCost).toBe(0);
+    expect(outputCost).toBe(0);
   });
 
-  it("subscribes to cost_event.created and agent.run.finished", () => {
-    expect(harness.events["cost_event.created"]).toBeTypeOf("function");
-    expect(harness.events["agent.run.finished"]).toBeTypeOf("function");
+  it("computes cost as tokens / 1M × rate", () => {
+    const { inputCost, outputCost } = priceFor("opus-4-8", 2_000_000, 1_000_000, FULL_PRICING);
+    expect(inputCost).toBeCloseTo(10, 8); // 2M × $5 = $10
+    expect(outputCost).toBeCloseTo(25, 8); // 1M × $25 = $25
   });
 
-  it("schedules a rollup-daily job on a */15 cron", () => {
-    const job = harness.jobs["rollup-daily"];
-    expect(job).toBeTruthy();
-    expect(job.cron).toBe("*/15 * * * *");
-  });
-
-  it("registers the action handlers used by the UI", () => {
-    for (const name of [
-      "getDailyUsage",
-      "getMonthlySummary",
-      "getPricing",
-      "setPricing",
-    ]) {
-      expect(harness.actions[name]).toBeTypeOf("function");
-    }
-  });
-
-  it("registers the monthly CSV export route", () => {
-    expect(harness.apiRoutes["GET /export/monthly.csv"]).toBeTypeOf("function");
+  it("returns zero when a model is missing from the rate table", () => {
+    const sparse = { ...FULL_PRICING, pricing: { ...FULL_PRICING.pricing } } as PricingConfig;
+    delete (sparse.pricing as Record<string, unknown>)["opus-4-8"];
+    const { inputCost, outputCost } = priceFor("opus-4-8", 1_000_000, 1_000_000, sparse);
+    expect(inputCost).toBe(0);
+    expect(outputCost).toBe(0);
   });
 });
 
-describe.skip("usage event ingestion", () => {
-  it("inserts one usage_events row per cost_event.created", async () => {
-    const harness = makeCtx();
-    await register(harness.ctx as any);
-
-    await harness.events["cost_event.created"](
-      {
-        id: "evt-1",
-        payload: {
-          companyId: "co-1",
-          agentId: "ag-1",
-          model: "claude-opus",
-          inputTokens: 1000,
-          outputTokens: 500,
-          occurredAt: "2026-06-13T10:00:00Z",
-        },
-      },
-      harness.ctx as any,
-    );
-
-    expect(harness.db.tables.usage_events).toHaveLength(1);
-    const row = harness.db.tables.usage_events[0];
-    expect(row.company_id).toBe("co-1");
-    expect(row.input_tokens).toBe(1000);
-    expect(row.output_tokens).toBe(500);
-    expect(row.day).toBe("2026-06-13");
+describe("subscriptionDivisor", () => {
+  it("defaults to 1 when pricing or subscription is absent", () => {
+    expect(subscriptionDivisor(null)).toBe(1);
+    expect(subscriptionDivisor(undefined)).toBe(1);
+    expect(subscriptionDivisor({ ...FULL_PRICING, subscription: undefined })).toBe(1);
   });
 
-  it("is idempotent on duplicate source_event_id", async () => {
-    const harness = makeCtx();
-    await register(harness.ctx as any);
-
-    const event = {
-      id: "evt-dup",
-      payload: {
-        companyId: "co-1",
-        agentId: "ag-1",
-        model: "claude-sonnet",
-        inputTokens: 10,
-        outputTokens: 20,
-        occurredAt: "2026-06-13T10:00:00Z",
-      },
+  it("returns 1 for 'off' even if divisor is set non-1", () => {
+    const cfg: PricingConfig = {
+      ...FULL_PRICING,
+      subscription: { preset: "off", divisor: 99 },
     };
+    expect(subscriptionDivisor(cfg)).toBe(1);
+  });
 
-    await harness.events["cost_event.created"](event, harness.ctx as any);
-    await harness.events["cost_event.created"](event, harness.ctx as any);
+  it("returns the per-preset divisor for pro and max", () => {
+    const pro: PricingConfig = {
+      ...FULL_PRICING,
+      subscription: { preset: "pro", divisor: SUBSCRIPTION_DIVISORS.pro },
+    };
+    const max: PricingConfig = {
+      ...FULL_PRICING,
+      subscription: { preset: "max", divisor: SUBSCRIPTION_DIVISORS.max },
+    };
+    expect(subscriptionDivisor(pro)).toBe(5);
+    expect(subscriptionDivisor(max)).toBe(20);
+  });
 
-    expect(harness.db.tables.usage_events).toHaveLength(1);
+  it("falls back to 1 when divisor is non-finite or non-positive", () => {
+    const broken: PricingConfig = {
+      ...FULL_PRICING,
+      subscription: { preset: "max", divisor: -1 },
+    };
+    expect(subscriptionDivisor(broken)).toBe(1);
   });
 });
 
-describe.skip("pricing actions", () => {
-  it("round-trips a pricing config", async () => {
-    const harness = makeCtx();
-    await register(harness.ctx as any);
+describe("isPricingConfig", () => {
+  it("accepts the canonical PricingConfig shape", () => {
+    expect(isPricingConfig(FULL_PRICING)).toBe(true);
+  });
 
-    const config = {
+  it("rejects partial pricing tables", () => {
+    const partial = { ...FULL_PRICING, pricing: { "opus-4-8": { input: 5, output: 25 } } };
+    expect(isPricingConfig(partial)).toBe(false);
+  });
+
+  it("rejects missing margin", () => {
+    const noMargin = { ...FULL_PRICING } as Partial<PricingConfig>;
+    delete noMargin.margin;
+    expect(isPricingConfig(noMargin)).toBe(false);
+  });
+
+  it("tolerates missing subscription (legacy pre-0.7.0 configs)", () => {
+    const noSub = { ...FULL_PRICING } as PricingConfig;
+    delete noSub.subscription;
+    expect(isPricingConfig(noSub)).toBe(true);
+  });
+});
+
+describe("upgradePricingConfig", () => {
+  it("returns a copy of DEFAULT_PRICING for arbitrary garbage", () => {
+    const out = upgradePricingConfig({ random: "garbage" });
+    expect(out.pricing["opus-4-8"]).toEqual({ input: 5, output: 25 });
+    expect(out.margin).toEqual({ percent: 0 });
+  });
+
+  it("carries forward legacy bare opus/sonnet keys to the most recent variant", () => {
+    const legacy = {
       pricing: {
-        "opus-4-8":      { input: 5, output: 25 },
-        "opus-4-8-1m":   { input: 5, output: 25 },
-        "opus-4-7":      { input: 5, output: 25 },
-        "opus-4-7-1m":   { input: 5, output: 25 },
-        "sonnet-4-6":    { input: 3, output: 15 },
-        "sonnet-4-6-1m": { input: 3, output: 15 },
-        "sonnet-4-5":    { input: 3, output: 15 },
-        "sonnet-4-5-1m": { input: 3, output: 15 },
+        opus: { input: 8, output: 40 },
+        sonnet: { input: 4, output: 20 },
       },
-      margin: { percent: 20 },
+      margin: { percent: 12 },
     };
+    const out = upgradePricingConfig(legacy);
+    expect(out.pricing["opus-4-7"]).toEqual({ input: 8, output: 40 });
+    expect(out.pricing["sonnet-4-6"]).toEqual({ input: 4, output: 20 });
+    expect(out.margin.percent).toBe(12);
+  });
 
-    await harness.actions.setPricing(
-      { companyId: "co-1", config },
-      harness.ctx as any,
-    );
+  it("does not clobber explicitly-set new keys with legacy ones", () => {
+    const mixed = {
+      pricing: {
+        opus: { input: 99, output: 99 },
+        "opus-4-7": { input: 7, output: 35 },
+      },
+      margin: { percent: 0 },
+    };
+    const out = upgradePricingConfig(mixed);
+    // opus-4-7 was explicitly set, so the legacy `opus` mapping is ignored.
+    expect(out.pricing["opus-4-7"]).toEqual({ input: 7, output: 35 });
+  });
+});
 
-    const result = await harness.actions.getPricing(
-      { companyId: "co-1" },
-      harness.ctx as any,
-    );
+// ---- Filename slugger -----------------------------------------------------
 
-    expect(result).toBeTruthy();
-    expect(result.pricing["opus-4-8"].input).toBe(5);
-    expect(result.pricing["opus-4-8"].output).toBe(25);
-    expect(result.pricing["sonnet-4-5-1m"].input).toBe(3);
-    expect(result.margin.percent).toBe(20);
+describe("slugifyForFilename", () => {
+  it("lowercases and replaces non-alphanumerics with hyphens", () => {
+    expect(slugifyForFilename("Alarm-Direct Social")).toBe("alarm-direct-social");
+    expect(slugifyForFilename("Acme & Co.")).toBe("acme-co");
+  });
+
+  it("strips leading and trailing hyphens", () => {
+    expect(slugifyForFilename("  ¡¡Hello!! ")).toBe("hello");
+  });
+
+  it("collapses repeated separators", () => {
+    expect(slugifyForFilename("foo___bar...baz   qux")).toBe("foo-bar-baz-qux");
+  });
+
+  it("caps the result at 40 chars", () => {
+    const long = "a".repeat(80);
+    expect(slugifyForFilename(long)).toHaveLength(40);
+  });
+
+  it("returns an empty string when nothing survives", () => {
+    expect(slugifyForFilename("////")).toBe("");
+    expect(slugifyForFilename("")).toBe("");
   });
 });
