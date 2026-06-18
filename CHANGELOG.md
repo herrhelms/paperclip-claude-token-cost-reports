@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-06-18
+### Changed
+- README rewritten as a consumer-focused install guide: install command up top, Quick start walkthrough for first-time Settings configuration, reordered structure (Install → Quick start → What it does → Subscription mode → Billing → Reference → Build from source).
+- Fixed stale `plugin_claude_token_usage_<hash>` namespace reference in the data-model section.
+- Git history rewritten with `git filter-repo` to remove a test-fixture company UUID that had leaked into commit messages. No content change at HEAD; SHAs of all prior commits change.
+
 ## [1.0.0-rc.2] - 2026-06-16
 ### Changed
 - Worker bundle no longer ships `@paperclipai/plugin-sdk` (now marked external in esbuild). `dist/worker.js` shrinks from 426 KB to 51 KB; published tarball drops from 211 KB to 34 KB.
