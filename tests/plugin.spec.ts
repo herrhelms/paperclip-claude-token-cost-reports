@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import manifest from "../src/manifest";
 import {
   isPricingConfig,
+  isPlausibleFxRate,
   isIsoDate,
   csvCell,
   normalizeModel,
@@ -353,5 +354,33 @@ describe("csvCell", () => {
   it("quotes when value contains CR or LF", () => {
     expect(csvCell("line1\nline2")).toBe('"line1\nline2"');
     expect(csvCell("line1\rline2")).toBe('"line1\rline2"');
+  });
+});
+
+describe("isPlausibleFxRate", () => {
+  it("accepts realistic rates", () => {
+    expect(isPlausibleFxRate(0.92)).toBe(true); // USD->EUR
+    expect(isPlausibleFxRate(0.79)).toBe(true); // USD->GBP
+    expect(isPlausibleFxRate(157.4)).toBe(true); // USD->JPY
+  });
+
+  it("rejects rates that are zero, negative, or NaN", () => {
+    expect(isPlausibleFxRate(0)).toBe(false);
+    expect(isPlausibleFxRate(-1.2)).toBe(false);
+    expect(isPlausibleFxRate(NaN)).toBe(false);
+    expect(isPlausibleFxRate(Infinity)).toBe(false);
+    expect(isPlausibleFxRate(-Infinity)).toBe(false);
+  });
+
+  it("rejects rates outside the sanity envelope", () => {
+    expect(isPlausibleFxRate(0.001)).toBe(false);
+    expect(isPlausibleFxRate(10_000)).toBe(false);
+    expect(isPlausibleFxRate(1_000_000)).toBe(false);
+  });
+
+  it("rejects non-numbers", () => {
+    expect(isPlausibleFxRate("0.92")).toBe(false);
+    expect(isPlausibleFxRate(undefined)).toBe(false);
+    expect(isPlausibleFxRate(null)).toBe(false);
   });
 });
