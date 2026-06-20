@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-06-20
+### Fixed
+- Removed migration `005_drop_pricing_config.sql`. The Paperclip host rejects destructive DDL (DROP TABLE) under its Phase 1 plugin policy, so 2.0.0 installs failed at the migration step. The `pricing_config` table stays in the schema as harmless dead surface (declared in 001_init, never used at runtime since 0.7.0). The archive handler's DELETE-from-pricing_config was already removed in 2.0.0 — that stays gone; only the cleanup migration is reverted.
+
+### Note
+- The 2.0.0 CHANGELOG entry's "Removed: pricing_config table" line is now inaccurate. Left intact for the historical record; this 2.0.1 entry is the corrective note.
+
 ## [2.0.0] - 2026-06-20
 
 First major version. Replaces the hardcoded `ModelKey` enum + single mutable pricing config with a free-form pricing matrix stored as snapshots, so operators can add any model id themselves and historical periods bill against the rates active when the tokens were burned. No code release needed when Anthropic ships a new model id.
