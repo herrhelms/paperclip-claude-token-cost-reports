@@ -17,10 +17,14 @@ export type ModelKey =
   | "opus-4-8-1m"
   | "opus-4-7"
   | "opus-4-7-1m"
+  | "opus-4-6"
+  | "opus-4-6-1m"
+  | "opus-4-5"
   | "sonnet-4-6"
   | "sonnet-4-6-1m"
   | "sonnet-4-5"
   | "sonnet-4-5-1m"
+  | "haiku-4-5"
   | "unknown";
 
 export const PRICED_MODEL_KEYS: ReadonlyArray<Exclude<ModelKey, "unknown">> = [
@@ -28,10 +32,14 @@ export const PRICED_MODEL_KEYS: ReadonlyArray<Exclude<ModelKey, "unknown">> = [
   "opus-4-8-1m",
   "opus-4-7",
   "opus-4-7-1m",
+  "opus-4-6",
+  "opus-4-6-1m",
+  "opus-4-5",
   "sonnet-4-6",
   "sonnet-4-6-1m",
   "sonnet-4-5",
   "sonnet-4-5-1m",
+  "haiku-4-5",
 ];
 
 type PricingRates = Record<Exclude<ModelKey, "unknown">, { input: number; output: number }>;
@@ -89,16 +97,25 @@ interface DailyRow {
 // at standard pricing — no surcharge for >200k requests. We mirror those rates for the [1m] variants.
 // Sonnet 4.5 is not listed as 1M-included on the current page; its [1m] default mirrors the base
 // rate so the line item exists if the operator's data uses it. Operator can override either.
+// Rates sourced from https://platform.claude.com/docs/en/about-claude/pricing
+// 2026-06-20 fetch. Per the "Long context pricing" section there, Opus 4.6 / 4.7 /
+// 4.8 and Sonnet 4.6 include the full 1M context window at STANDARD pricing —
+// so the -1m variants share the base rate. Opus 4.5 and Haiku 4.5 don't appear
+// on the 1M-included list, so no -1m row for them.
 const DEFAULT_PRICING: PricingConfig = {
   pricing: {
-    "opus-4-8":      { input: 5, output: 25 },
-    "opus-4-8-1m":   { input: 5, output: 25 },
-    "opus-4-7":      { input: 5, output: 25 },
-    "opus-4-7-1m":   { input: 5, output: 25 },
-    "sonnet-4-6":    { input: 3, output: 15 },
-    "sonnet-4-6-1m": { input: 3, output: 15 },
-    "sonnet-4-5":    { input: 3, output: 15 },
-    "sonnet-4-5-1m": { input: 3, output: 15 },
+    "opus-4-8":      { input: 5,    output: 25 },
+    "opus-4-8-1m":   { input: 5,    output: 25 },
+    "opus-4-7":      { input: 5,    output: 25 },
+    "opus-4-7-1m":   { input: 5,    output: 25 },
+    "opus-4-6":      { input: 5,    output: 25 },
+    "opus-4-6-1m":   { input: 5,    output: 25 },
+    "opus-4-5":      { input: 5,    output: 25 },
+    "sonnet-4-6":    { input: 3,    output: 15 },
+    "sonnet-4-6-1m": { input: 3,    output: 15 },
+    "sonnet-4-5":    { input: 3,    output: 15 },
+    "sonnet-4-5-1m": { input: 3,    output: 15 },
+    "haiku-4-5":     { input: 1,    output: 5  },
   },
   margin: { percent: 0 },
   subscription: { preset: "off", divisor: 1 },
@@ -921,10 +938,14 @@ const CSV_MODEL_LABELS: Record<string, string> = {
   "opus-4-8-1m": "Opus 4.8[1m]",
   "opus-4-7": "Opus 4.7",
   "opus-4-7-1m": "Opus 4.7[1m]",
+  "opus-4-6": "Opus 4.6",
+  "opus-4-6-1m": "Opus 4.6[1m]",
+  "opus-4-5": "Opus 4.5",
   "sonnet-4-6": "Sonnet 4.6",
   "sonnet-4-6-1m": "Sonnet 4.6[1m]",
   "sonnet-4-5": "Sonnet 4.5",
   "sonnet-4-5-1m": "Sonnet 4.5[1m]",
+  "haiku-4-5": "Haiku 4.5",
 };
 
 // Client-facing CSV: one row per (calendar-month, model) showing tokens and

@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-20
+### Added
+- 5 new rows in the priced model table to cover model identifiers the host emits but the 8-row table missed: `opus-4-6`, `opus-4-6-1m`, `opus-4-5`, `haiku-4-5`. The standout — `opus-4-6` / `opus-4-6-1m` at $5 / $25 per MTok — is why historical April periods with Claude Opus 4.6 events showed up as `unknown` model and €0.00 cost. Rates fetched from platform.claude.com/docs/en/about-claude/pricing on 2026-06-20. Per the page's "Long context pricing" section, Opus 4.6 / 4.7 / 4.8 and Sonnet 4.6 include the full 1M-context window at standard pricing, so each `-1m` row matches the standard rate.
+- Settings page now renders 12 rows (was 8). Existing installs keep their custom rates for the original 8 keys; new keys are seeded from defaults on next load via the existing upgrade path.
+
+### Note
+- This is a tactical extension of the hardcoded table, NOT the operator-extensible matrix design discussed for 2.0.0. Long-term plan: drop the static enum, let operators add arbitrary `(model-key, rate)` rows in Settings, and snapshot pricing changes with `effective_from` so historical periods bill against the configuration that was active when the tokens were consumed. Tracked as a separate work item.
+
 ## [1.0.3] - 2026-06-20
 ### Changed
 - README: Install section now documents the install / uninstall slug asymmetry. The npm package is scoped (`@herrhelms/…`) but the in-app plugin key is not, so install uses `@herrhelms/claude-token-cost-reports` while uninstall uses `claude-token-cost-reports`. The host's `paperclipai plugin list` prints the unscoped key, but a single line in the README saves operators a head-scratch on first uninstall.

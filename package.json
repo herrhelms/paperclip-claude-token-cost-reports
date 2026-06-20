@@ -1,6 +1,6 @@
 {
   "name": "@herrhelms/claude-token-cost-reports",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publishConfig": {
     "access": "public"
   },
