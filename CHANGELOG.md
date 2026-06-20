@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-06-20
+
+First major version. Replaces the hardcoded `ModelKey` enum + single mutable pricing config with a free-form pricing matrix stored as snapshots, so operators can add any model id themselves and historical periods bill against the rates active when the tokens were burned. No code release needed when Anthropic ships a new model id.
+
+### Changed (breaking)
+- BREAKING: `PricingConfig.pricing` type changes from `Record<ModelKey, …>` (fixed 12-entry enum) to `Record<string, RateRow>` (free-form keys). Operators can add / edit / delete any row in Settings.
+- BREAKING: `ModelKey` type literal is removed. `usage_events.model` is now the raw payload string verbatim (no normalization). Pricing lookup is exact match.
+- BREAKING: `normalizeModel`, `PRICED_MODEL_KEYS`, `MODEL_LABELS`, `CSV_MODEL_LABELS`, `LEGACY_MODEL_REMAP` removed. Forks importing these directly need to update.
+- BREAKING: subscription preset enum (`off`/`pro`/`max`) replaced by one number knob `effective_input_rate_multiplier` (default 1.0). Operators set 0.2 for Pro (÷5), 0.05 for Max (÷20), or anything else.
+
+### Added
+- `pricing_config_history` table (migration 004). Every save appends a row keyed by `(company_id, effective_from)`. Cost computation looks up the snapshot active at each event's `occurred_at`. Historical periods stay billed against their contemporary snapshot.
+- Settings page: Add / Edit / Delete rows, optional `display_name` per row, History panel with Revert-to-snapshot, deep-link from dashboard "no rate set" chip via URL hash.
+- Dashboard: "no rate set" amber chip on per-model bars and per-agent table cells, with click-to-add-rate jump.
+- CSV export `?unpriced=skip` (default) / `?unpriced=include` query param.
+- Worker actions: `addPricingSnapshot` (explicit effective_from + note), `revertToPricingSnapshot`. `setPricing` retains its signature and now appends a snapshot.
+- Worker data handler: `listPricingHistory`.
+
+### Migrated automatically (no operator action required)
+- First 2.0.0 worker boot per host:
+  1. Walks each company with usage_events. If 1.x `pricing-config` ctx.state exists, inserts it as a `pricing_config_history` row with `effective_from = '1970-01-01T00:00:00Z'`. Operator's existing rates become the active snapshot for all time.
+  2. Final cleanup sweep — any `usage_events` row with `model='unknown'` and a non-`unknown` `raw_model` gets its `model` set to `raw_model` verbatim (2.0.0 doesn't normalize). Re-rolls affected days.
+  3. Sets the instance-scoped marker so subsequent boots skip.
+- The 1.0.6 `recoverRawModelsFromHost` / `renormalizeStaleModels` / `sampleRawModels` diagnostics stay available for hosts that need a targeted reapply.
+
+### Removed
+- `pricing_config` table (migration 005). Declared in 001_init, never used at runtime.
+
 ## [1.0.6] - 2026-06-20
 ### Added
 - `recoverRawModelsFromHost` action + `sampleRawModels` data handler. The recovery action joins `usage_events` to `public.cost_events` on `'cost_event:' || ce.id::text = source_event_id` and re-sources `raw_model` from the host's preserved payload. The data handler surfaces the distinct raw_model values + their stored / would-normalize-to keys for diagnostic purposes.

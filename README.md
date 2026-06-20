@@ -14,7 +14,7 @@ paperclipai plugin install @herrhelms/claude-token-cost-reports
 
 # Verify the install
 paperclipai plugin list
-# expect: key=claude-token-cost-reports  status=ready  version=1.0.6  id=<uuid>
+# expect: key=claude-token-cost-reports  status=ready  version=2.0.0  id=<uuid>
 ```
 
 The host runs the plugin's database migrations automatically and registers the dashboard + settings page slots. No additional configuration is required to install — pricing and currency are set per-company in the Settings page after install.
@@ -39,7 +39,7 @@ The host runs the plugin's database migrations automatically and registers the d
 | Surface | Where to find it | What's there |
 | --- | --- | --- |
 | Dashboard | `/$COMPANY_HANDLE/monthly-report-claude` (in the company sidebar) | Usage KPIs, per-model bars, per-agent table, daily chart, monthly CSV export |
-| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Per-model rates, margin, billing currency, FX-rate status, and an optional subscription-mode toggle |
+| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Free-form pricing matrix (Add / Edit / Delete rows), margin, billing currency, FX-rate status, snapshot history timeline, optional subscription multiplier |
 
 The `<install-uuid>` is printed by `paperclipai plugin list` after install.
 
@@ -51,7 +51,7 @@ After install, open the Settings page for any company:
 
 1. **Pick a billing currency** (10 supported). The hourly FX job fetches today's USD→target rate and stores one row per `(day, currency)`.
 2. **Set a margin %** — what you add on top of cost when invoicing the client.
-3. **(Optional) Adjust per-model rates.** Defaults are seeded from Anthropic list prices for Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5, including the 1M-context variants.
+3. **(Optional) Adjust per-model rates or add new model rows.** Defaults are seeded from Anthropic's list prices for Opus 4.6 / 4.7 / 4.8, Sonnet 4.5 / 4.6, and Haiku 4.5 (including 1M-context variants). For any model id you see the host emit that's missing from the table, click "Add rate" — type the exact model string and set input/output rates. The dashboard's "no rate set" chip surfaces these in real time.
 4. **(Optional) Pick a subscription preset.** Most operators leave this at **Off** and bill against the raw API list price. If you're running off a Pro or Max subscription, read the [Subscription mode](#subscription-mode) section before turning it on — the divisors are approximations, not Anthropic rates.
 5. **Backfill historical events.** Use `Backfill from history` for the current period or `Backfill all history` to seed from the company's first event. The plugin reads `public.cost_events` directly via the `coreReadTables` whitelist, so pre-install usage is available immediately.
 
@@ -105,19 +105,26 @@ The monthly CSV emits only `row.price` — operator-internal numbers (list cost,
 
 ## Subscription mode
 
-> ⚠️ **The ÷5 / ÷20 divisors are an approximation, not an Anthropic rate.**
+> ⚠️ **The multiplier is an approximation, not an Anthropic rate.**
 >
-> Anthropic does not publish a per-token cost for Pro or Max subscriptions. What a subscription user effectively pays per token varies with monthly usage and is not a straight discount on the API list price. The constants here are pragmatic stand-ins so that an operator on a flat-rate plan can fold a subscription account into the same billing pipeline the rest of the system runs on — list price → divisor → margin → currency → invoice. They are NOT a recovered Anthropic price formula.
+> Anthropic does not publish a per-token cost for Pro or Max subscriptions. What a subscription user effectively pays per token varies with monthly usage and is not a straight discount on the API list price. The multiplier here is a pragmatic stand-in so that an operator on a flat-rate plan can fold a subscription account into the same billing pipeline the rest of the system runs on — list price → multiplier → margin → currency → invoice. It is NOT a recovered Anthropic price formula.
 
-Use this mode if you need a defensible chargeback number for a client and you don't want to invent one. If your contract or workload diverges materially from `list ÷ divisor`, override the per-model rates in Settings and leave the preset at **Off** — that path stays honest by construction.
+Use this mode if you need a defensible chargeback number for a client and you don't want to invent one. If your contract or workload diverges materially from `list × multiplier`, override the per-model rates in Settings and leave the multiplier at **1.0** — that path stays honest by construction.
 
-| Preset | Divisor | Use when |
+The plugin has one knob: `effective_input_rate_multiplier`, default `1.0`
+(no adjustment). Operators on a flat-rate subscription set it to whatever
+matches their effective per-token cost:
+
+| Plan | Multiplier | Why |
 | --- | --- | --- |
-| Off | 1 | Client pays for raw API consumption (default; most accurate) |
-| Claude Pro | 5 | Operator covers usage with a Pro subscription |
-| Claude Max | 20 | Operator covers usage with a Max subscription |
+| Off (default) | 1.0 | Client pays full API list price |
+| Claude Pro | 0.2 | ÷5 of list — matches the 1.x Pro preset |
+| Claude Max | 0.05 | ÷20 of list — matches the 1.x Max preset |
+| Custom | any value in (0, 1] | Operator-specific contract |
 
-Switching modes never rewrites historical data — it's a render-time recompute. KPI labels and per-agent column headers update in place. The monthly CSV applies the divisor at row aggregation so the exported invoice matches the dashboard total to the cent.
+The multiplier applies to the input rate only. Output stays at list.
+Switching multipliers creates a new snapshot, so historical periods are
+unaffected.
 
 ---
 
