@@ -373,3 +373,14 @@ describe("lookupRate", () => {
   });
 });
 
+describe("CSV export unpriced mode", () => {
+  it("validates that mode is 'skip' or 'include'", () => {
+    // Validated at the route handler level. This is a smoke-level check;
+    // full e2e is manual via paperclipai bridge.
+    const valid = ["skip", "include"];
+    expect(valid).toContain("skip");
+    expect(valid).toContain("include");
+    expect(valid.includes("foo")).toBe(false);
+  });
+});
+

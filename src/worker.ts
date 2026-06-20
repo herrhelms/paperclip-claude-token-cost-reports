@@ -913,6 +913,7 @@ async function buildClientMonthlyCsv(
   companyId: string,
   from: string,
   to: string,
+  unpricedMode: "skip" | "include" = "skip",
 ): Promise<{ csv: string; currency: CurrencyCode }> {
   const snapshots = await loadAllSnapshots(ctx, companyId);
   const hasPricing = snapshots.length > 0;
@@ -977,8 +978,23 @@ async function buildClientMonthlyCsv(
     fxByMonth.set(b.month_end, fx?.rate ?? 1);
   }
 
+  // Resolve whether each bucket has a rate at its month-end snapshot. The CSV
+  // groups by (month, model), so one rate-check per row is enough. In skip
+  // mode we drop unpriceable rows so the client never sees the model name;
+  // include mode keeps them with an empty price column for reconciliation.
+  const hasRateByKey = new Map<string, boolean>();
+  for (const b of buckets.values()) {
+    const snap = findActiveSnapshot(snapshots, `${b.month_end}T12:00:00Z`);
+    const rate = snap ? lookupRate(snap, b.model) : undefined;
+    hasRateByKey.set(`${b.month}|${b.model}`, !!rate);
+  }
+
   const rows = Array.from(buckets.values())
     .filter((b) => b.input_tokens + b.output_tokens > 0)
+    .filter((b) =>
+      unpricedMode === "include" ||
+      hasRateByKey.get(`${b.month}|${b.model}`) === true,
+    )
     .sort((a, b) => {
       if (a.month !== b.month) return a.month.localeCompare(b.month);
       const totalA = a.input_tokens + a.output_tokens;
@@ -1014,7 +1030,11 @@ async function buildClientMonthlyCsv(
   for (const b of rows) {
     const total = b.input_tokens + b.output_tokens;
     const fxRate = fxByMonth.get(b.month_end) ?? 1;
-    const priceNative = hasPricing
+    // Unpriced rows (include mode only — skip mode already filtered them out)
+    // emit an empty price column rather than a misleading 0.00, so the
+    // operator can see token usage without implying a billable amount.
+    const rowHasRate = hasRateByKey.get(`${b.month}|${b.model}`) === true;
+    const priceNative = hasPricing && rowHasRate
       ? b.billed_usd * fxRate
       : null;
     // Use the active snapshot's display_name for this model, fall back
@@ -2488,8 +2508,22 @@ const plugin = definePlugin({
         body: "companyId required; from + to must be YYYY-MM-DD",
       };
     }
+    const unpriced = String(
+      Array.isArray(input.query.unpriced)
+        ? input.query.unpriced[0]
+        : input.query.unpriced ?? "skip",
+    );
+    if (unpriced !== "skip" && unpriced !== "include") {
+      return {
+        status: 400,
+        headers: { "content-type": "text/plain" },
+        body: "unpriced must be 'skip' or 'include' (default skip)",
+      };
+    }
     if (!ctx) return { status: 500, body: { error: "worker not initialized" } };
-    const { csv, currency } = await buildClientMonthlyCsv(ctx, companyId, from, to);
+    const { csv, currency } = await buildClientMonthlyCsv(
+      ctx, companyId, from, to, unpriced as "skip" | "include",
+    );
     // Resolve a human-readable company slug for the filename. Falls back to
     // the company UUID if the lookup fails or the name doesn't slugify to
     // anything safe — clients shouldn't have to read UUIDs.
