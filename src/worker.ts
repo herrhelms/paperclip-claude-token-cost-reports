@@ -2225,6 +2225,106 @@ const plugin = definePlugin({
         daysRolledUp: affected.size,
       };
     });
+
+    // Recovery action for hosts where migration 002_costs_overview.sql
+    // (shipped in 0.3.0) clobbered raw_model with the already-normalized
+    // model value: `SET raw_model = model WHERE raw_model IS NULL`. Legacy
+    // rows ingested before the raw_model column existed lost their original
+    // payload model strings — so an `unknown` row carries `raw_model="unknown"`
+    // instead of the original e.g. `claude-opus-4-6[1m]`. This action joins
+    // usage_events to public.cost_events on `cost_event:<id> = source_event_id`
+    // and re-sources raw_model from the host's stored payload. Then renormalize.
+    // Idempotent — only rewrites rows where raw_model matches the (lossy)
+    // normalized form. Optional companyId parameter scopes the sweep.
+    ctx.actions.register("recoverRawModelsFromHost", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      // ctx.db.execute can't run cross-schema UPDATE … FROM public.cost_events
+      // even though coreReadTables grants SELECT access. Build the recovery
+      // map in memory: SELECT the host's stored model for every cost_event,
+      // then per-row UPDATE the plugin's usage_events.
+      const hostRows = await ctx.db.query<{ id: string; model: string }>(
+        `SELECT id::text AS id, model
+           FROM public.cost_events
+          WHERE provider IN ('anthropic', 'claude')
+            ${companyId ? "AND company_id = $1::uuid" : ""}`,
+        companyId ? [companyId] : [],
+      );
+      const hostModelByKey = new Map<string, string>();
+      for (const r of hostRows) {
+        hostModelByKey.set(`cost_event:${r.id}`, r.model);
+      }
+
+      // Target only the rows the 0.3.0 migration corrupted — raw_model equals
+      // the normalized model column (the migration's clobber signature).
+      const candidates = await ctx.db.query<{
+        source_event_id: string;
+        raw_model: string | null;
+      }>(
+        `SELECT source_event_id, raw_model
+           FROM ${q(ctx, "usage_events")}
+          WHERE raw_model = model
+            ${companyId ? "AND company_id = $1" : ""}`,
+        companyId ? [companyId] : [],
+      );
+
+      let recovered = 0;
+      for (const r of candidates) {
+        const hostModel = hostModelByKey.get(r.source_event_id);
+        if (hostModel && hostModel !== r.raw_model) {
+          await ctx.db.execute(
+            `UPDATE ${q(ctx, "usage_events")}
+                SET raw_model = $1
+              WHERE source_event_id = $2`,
+            [hostModel, r.source_event_id],
+          );
+          recovered++;
+        }
+      }
+      ctx.logger.info("recoverRawModelsFromHost done", {
+        rowsRecovered: recovered,
+        candidates: candidates.length,
+        hostRowsSeen: hostRows.length,
+        companyFilter: companyId || null,
+      });
+      return {
+        rowsRecovered: recovered,
+        candidates: candidates.length,
+        hostRowsSeen: hostRows.length,
+      };
+    });
+
+    // Diagnostic: surface the distinct raw_model values stored in
+    // usage_events so an operator can see what the normalizer is fed.
+    ctx.data.register("sampleRawModels", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      const where = companyId
+        ? "WHERE raw_model IS NOT NULL AND company_id = $1"
+        : "WHERE raw_model IS NOT NULL";
+      const args = companyId ? [companyId] : [];
+      const rows = await ctx.db.query<{
+        raw_model: string;
+        stored_model: string;
+        rowcount: number;
+      }>(
+        `SELECT raw_model,
+                model AS stored_model,
+                COUNT(*)::int AS rowcount
+           FROM ${q(ctx, "usage_events")}
+           ${where}
+       GROUP BY raw_model, model
+       ORDER BY rowcount DESC
+          LIMIT 50`,
+        args,
+      );
+      return {
+        rows: rows.map((r) => ({
+          raw_model: r.raw_model,
+          stored_model: r.stored_model,
+          would_normalize_to: normalizeModel(r.raw_model),
+          count: r.rowcount,
+        })),
+      };
+    });
   },
 
   async onApiRequest(input: PluginApiRequestInput): Promise<PluginApiResponse> {

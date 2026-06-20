@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-06-20
+### Added
+- `recoverRawModelsFromHost` action + `sampleRawModels` data handler. The recovery action joins `usage_events` to `public.cost_events` on `'cost_event:' || ce.id::text = source_event_id` and re-sources `raw_model` from the host's preserved payload. The data handler surfaces the distinct raw_model values + their stored / would-normalize-to keys for diagnostic purposes.
+
+### Why
+- Investigating why 1.0.5's `renormalizeStaleModels` reported `updated: 0` on a host that still showed 607M unknown tokens turned up the root cause: migration `002_costs_overview.sql` (shipped in 0.3.0) ran `UPDATE usage_events SET raw_model = model WHERE raw_model IS NULL` as a backfill for legacy rows. For events ingested before the raw_model column existed, that overwrote `raw_model` with the already-normalized `model` value — so an `unknown` row literally stores `raw_model='unknown'` instead of the original `claude-opus-4-6[1m]`. Re-running the normalizer on that lossy string is a no-op. The fix: re-source `raw_model` from the host's `public.cost_events` (preserved by the host) before re-normalizing.
+
+### Recovery sequence
+```bash
+# 1. Recover raw_model from the host's cost_events.
+paperclipai plugin bridge:action claude-token-cost-reports \
+  --payload-json '{"key":"recoverRawModelsFromHost","params":{}}' --json
+
+# 2. Re-run normalizer + rollup against the recovered raw_models.
+paperclipai plugin bridge:action claude-token-cost-reports \
+  --payload-json '{"key":"renormalizeStaleModels","params":{}}' --json
+
+# 3. Verify (per-model breakdown should now show priced rows).
+paperclipai plugin bridge:data claude-token-cost-reports \
+  --payload-json '{"key":"sampleRawModels","params":{}}' --json | jq
+```
+
 ## [1.0.5] - 2026-06-20
 ### Added
 - `renormalizeStaleModels` action that walks `usage_events`, re-runs `normalizeModel(raw_model)` for every row, updates `model` in-place where the result differs from the stored value, and re-rolls every affected `(company, day)`. Closes the gap exposed by 1.0.4: extending the priced table doesn't retroactively re-classify rows that were ingested under the old normalizer and stored as `model='unknown'`. Idempotent — re-running is a no-op once the data converges. Optional `companyId` parameter scopes the sweep; omitting it walks every company on the host.
