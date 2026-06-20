@@ -8,6 +8,7 @@ import {
   slugifyForFilename,
   subscriptionDivisor,
   SUBSCRIPTION_DIVISORS,
+  SUPPORTED_PROVIDERS,
   upgradePricingConfig,
   type ModelKey,
   type PricingConfig,
@@ -290,5 +291,18 @@ describe("slugifyForFilename", () => {
   it("returns an empty string when nothing survives", () => {
     expect(slugifyForFilename("////")).toBe("");
     expect(slugifyForFilename("")).toBe("");
+  });
+});
+
+describe("SUPPORTED_PROVIDERS filter", () => {
+  it("accepts 'anthropic' and 'claude'", () => {
+    expect(SUPPORTED_PROVIDERS.has("anthropic")).toBe(true);
+    expect(SUPPORTED_PROVIDERS.has("claude")).toBe(true);
+  });
+
+  it("rejects sibling provider strings", () => {
+    expect(SUPPORTED_PROVIDERS.has("openai")).toBe(false);
+    expect(SUPPORTED_PROVIDERS.has("gemini")).toBe(false);
+    expect(SUPPORTED_PROVIDERS.has("")).toBe(false);
   });
 });

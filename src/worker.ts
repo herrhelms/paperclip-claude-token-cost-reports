@@ -269,6 +269,14 @@ async function loadPricing(ctx: PluginContext, companyId: string): Promise<Prici
 // only fetches rates for currencies that at least one company is actually
 // using, so empty-config companies don't trigger network calls.
 
+// Ingest filter. The Paperclip host emits `cost_event.created` for every
+// LLM provider that contributes to a company's spend. This plugin only
+// tracks Anthropic / Claude usage; sibling plugins (e.g. openai-token-
+// cost-reports) handle their own providers. Without this filter, two
+// plugins installed side-by-side would each ingest the other's events
+// as `model='unknown'`.
+export const SUPPORTED_PROVIDERS = new Set(["anthropic", "claude"]);
+
 const SUPPORTED_CURRENCIES = [
   "USD",
   "EUR",
@@ -559,6 +567,7 @@ async function runBackfill(
             occurred_at::text    AS occurred_at
        FROM public.cost_events
       WHERE company_id = $1::uuid
+        AND provider IN ('anthropic', 'claude')
         AND occurred_at >= $2::timestamptz
         AND occurred_at <= $3::timestamptz`,
     [companyId, fromIso, toIso],
@@ -656,6 +665,11 @@ async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void
   const provider = String(
     payload.provider ?? payload.providerKey ?? "anthropic",
   ).toLowerCase();
+  if (!SUPPORTED_PROVIDERS.has(provider)) {
+    // Sibling plugins handle non-Anthropic providers. Early-exit before
+    // any DB write or rollup so the event is a true no-op for this plugin.
+    return;
+  }
   const source = String(
     payload.source ?? payload.billing ?? payload.billingMode ?? "api",
   ).toLowerCase();
@@ -2025,7 +2039,8 @@ const plugin = definePlugin({
       const [minRow] = await ctx.db.query<{ occurred_at: string | null }>(
         `SELECT MIN(occurred_at)::text AS occurred_at
            FROM public.cost_events
-          WHERE company_id = $1::uuid`,
+          WHERE company_id = $1::uuid
+            AND provider IN ('anthropic', 'claude')`,
         [companyId],
       );
       const earliest = minRow?.occurred_at;
