@@ -131,6 +131,17 @@ type PricingConfig = {
   effective_input_rate_multiplier?: number;
 };
 
+// Mirrors the worker's PricingSnapshot row. Listed by listPricingHistory,
+// rendered chronologically by HistoryPanel, and replayed by
+// revertToPricingSnapshot.
+type PricingSnapshot = {
+  effective_from: string;
+  config: PricingConfig;
+  note?: string | null;
+  created_at?: string;
+  created_by?: string | null;
+};
+
 // Empty fallback used only until getPricing resolves. The worker
 // returns DEFAULT_SEED_PRICING for fresh installs, so this is just
 // the React initial state placeholder.
@@ -1961,6 +1972,97 @@ export function UsagePage(): JSX.Element {
 }
 
 
+type ListPricingHistoryResponse = { snapshots: PricingSnapshot[] };
+
+function HistoryPanel({ companyId }: { companyId: string }): JSX.Element | null {
+  const history = usePluginData<ListPricingHistoryResponse>(
+    "listPricingHistory",
+    { companyId },
+  );
+  const revertAction = usePluginAction("revertToPricingSnapshot");
+
+  if (history.loading) {
+    return <div style={styles.kpiSub}>Loading history…</div>;
+  }
+  if (!history.data?.snapshots?.length) {
+    return (
+      <div style={styles.kpiSub}>
+        No snapshot history yet. Save pricing once to create the first snapshot.
+      </div>
+    );
+  }
+  return (
+    <section style={{ marginTop: 24 }}>
+      <h3 style={{ fontSize: 14, color: "var(--foreground)" }}>
+        Pricing snapshots
+      </h3>
+      <p style={{ fontSize: 12, color: "var(--muted-foreground)", maxWidth: 640 }}>
+        Each save creates a snapshot. Historical periods bill against the
+        snapshot active when the tokens were burned. Click "Revert" to copy
+        a snapshot's config into a new save with effective_from=now.
+      </p>
+      <ul style={{ listStyle: "none", padding: 0, marginTop: 12 }}>
+        {history.data.snapshots.map((s: PricingSnapshot) => {
+          const ratecount = Object.keys(s.config.pricing ?? {}).length;
+          const mult = s.config.effective_input_rate_multiplier;
+          return (
+            <li
+              key={s.effective_from}
+              style={{
+                padding: "10px 12px",
+                marginBottom: 8,
+                background: "var(--muted)",
+                borderLeft: "3px solid var(--primary)",
+                borderRadius: 4,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <strong style={{ fontSize: 13 }}>
+                  {new Date(s.effective_from).toLocaleString()}
+                </strong>
+                <span style={{ fontSize: 12, color: "var(--muted-foreground)" }}>
+                  · {ratecount} rate row{ratecount === 1 ? "" : "s"} · margin{" "}
+                  {s.config.margin?.percent ?? 0}%
+                  {mult !== undefined && mult !== 1 && ` · multiplier ${mult}`}
+                </span>
+                <button
+                  type="button"
+                  style={{ marginLeft: "auto", ...styles.btn }}
+                  onClick={async () => {
+                    const label = new Date(s.effective_from).toLocaleString();
+                    const ok = window.confirm(
+                      `Revert to snapshot from ${label}?`,
+                    );
+                    if (!ok) return;
+                    await revertAction({
+                      companyId,
+                      source_effective_from: s.effective_from,
+                    });
+                    window.location.reload();
+                  }}
+                >
+                  Revert to this
+                </button>
+              </div>
+              {s.note && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--muted-foreground)",
+                    marginTop: 4,
+                  }}
+                >
+                  Note: {s.note}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export function SettingsPage(): JSX.Element {
   const host = useHostContext();
   const nav = useHostNavigation();
@@ -2448,6 +2550,8 @@ export function SettingsPage(): JSX.Element {
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
+
+      <HistoryPanel companyId={companyId} />
     </div>
   );
 }
