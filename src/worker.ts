@@ -8,156 +8,24 @@ import type {
   PluginContext,
   PluginEvent,
 } from "@paperclipai/plugin-sdk";
-import type { PricingConfig as NewPricingConfig, PricingSnapshot } from "./pricing";
+import type { PricingConfig, PricingSnapshot } from "./pricing";
+export type { PricingConfig } from "./pricing";
 import {
   isValidPricingConfig,
   findActiveSnapshot,
   lookupRate as _lookupRate,
   DEFAULT_SEED_PRICING,
 } from "./pricing";
-// Re-export so Task 4's cost-computation rewire can import it from worker.ts.
-// Also keeps tsc's noUnusedLocals quiet until then.
+// Re-export so callers outside the worker can use the snapshot-aware lookup
+// without importing src/pricing directly.
 export const lookupRate = _lookupRate;
-
-// Model keys are stable identifiers stored in usage_events.model / usage_daily.model.
-// Format: `<family>-<major>-<minor>[-1m]`. The `-1m` suffix marks the 1M-token-context variant.
-// "unknown" is the catch-all for anything normalizeModel can't classify.
-export type ModelKey =
-  | "opus-4-8"
-  | "opus-4-8-1m"
-  | "opus-4-7"
-  | "opus-4-7-1m"
-  | "opus-4-6"
-  | "opus-4-6-1m"
-  | "opus-4-5"
-  | "sonnet-4-6"
-  | "sonnet-4-6-1m"
-  | "sonnet-4-5"
-  | "sonnet-4-5-1m"
-  | "haiku-4-5"
-  | "unknown";
-
-export const PRICED_MODEL_KEYS: ReadonlyArray<Exclude<ModelKey, "unknown">> = [
-  "opus-4-8",
-  "opus-4-8-1m",
-  "opus-4-7",
-  "opus-4-7-1m",
-  "opus-4-6",
-  "opus-4-6-1m",
-  "opus-4-5",
-  "sonnet-4-6",
-  "sonnet-4-6-1m",
-  "sonnet-4-5",
-  "sonnet-4-5-1m",
-  "haiku-4-5",
-];
-
-type PricingRates = Record<Exclude<ModelKey, "unknown">, { input: number; output: number }>;
-
-// Subscription presets reflect Anthropic's published subscription plans.
-// The divisor is the "value multiplier" — Claude Pro absorbs ~5x the list-price
-// cost of equivalent API usage; Claude Max ~20x. Divisor is applied before
-// margin so the chargeback rate reflects subscription savings.
-//
-// When mode === "off", divisor MUST be 1 (no-op). The discriminated value
-// keeps presets explicit so the UI can render labels without re-deriving.
-export type SubscriptionPreset = "off" | "pro" | "max";
-
-export const SUBSCRIPTION_DIVISORS: Record<SubscriptionPreset, number> = {
-  off: 1,
-  pro: 5,
-  max: 20,
-};
-
-export const SUBSCRIPTION_LABELS: Record<SubscriptionPreset, string> = {
-  off: "Off (full list price)",
-  pro: "Claude Pro (÷5)",
-  max: "Claude Max (÷20)",
-};
-
-export interface PricingConfig {
-  pricing: PricingRates;
-  margin: { percent: number };
-  // Optional for backward compat with persisted pre-0.7.0 configs.
-  // Loaders normalize missing/legacy shapes to { preset: "off", divisor: 1 }.
-  subscription?: {
-    preset: SubscriptionPreset;
-    divisor: number;
-  };
-}
-
-export function subscriptionDivisor(cfg: PricingConfig | null | undefined): number {
-  const sub = cfg?.subscription;
-  if (!sub) return 1;
-  if (sub.preset === "off") return 1;
-  if (!isFinite(sub.divisor) || sub.divisor <= 0) return 1;
-  return sub.divisor;
-}
 
 interface DailyRow {
   company_id: string;
   day: string;
-  model: ModelKey;
+  model: string;
   input_tokens: number;
   output_tokens: number;
-}
-
-// Defaults pulled from https://platform.claude.com/docs/en/about-claude/pricing#model-pricing.
-// Per the "Long context pricing" section: Opus 4.8 / 4.7 / Sonnet 4.6 INCLUDE the 1M context window
-// at standard pricing — no surcharge for >200k requests. We mirror those rates for the [1m] variants.
-// Sonnet 4.5 is not listed as 1M-included on the current page; its [1m] default mirrors the base
-// rate so the line item exists if the operator's data uses it. Operator can override either.
-// Rates sourced from https://platform.claude.com/docs/en/about-claude/pricing
-// 2026-06-20 fetch. Per the "Long context pricing" section there, Opus 4.6 / 4.7 /
-// 4.8 and Sonnet 4.6 include the full 1M context window at STANDARD pricing —
-// so the -1m variants share the base rate. Opus 4.5 and Haiku 4.5 don't appear
-// on the 1M-included list, so no -1m row for them.
-const DEFAULT_PRICING: PricingConfig = {
-  pricing: {
-    "opus-4-8":      { input: 5,    output: 25 },
-    "opus-4-8-1m":   { input: 5,    output: 25 },
-    "opus-4-7":      { input: 5,    output: 25 },
-    "opus-4-7-1m":   { input: 5,    output: 25 },
-    "opus-4-6":      { input: 5,    output: 25 },
-    "opus-4-6-1m":   { input: 5,    output: 25 },
-    "opus-4-5":      { input: 5,    output: 25 },
-    "sonnet-4-6":    { input: 3,    output: 15 },
-    "sonnet-4-6-1m": { input: 3,    output: 15 },
-    "sonnet-4-5":    { input: 3,    output: 15 },
-    "sonnet-4-5-1m": { input: 3,    output: 15 },
-    "haiku-4-5":     { input: 1,    output: 5  },
-  },
-  margin: { percent: 0 },
-  subscription: { preset: "off", divisor: 1 },
-};
-
-const LEGACY_MODEL_REMAP: Record<string, ModelKey> = {
-  // Pre-0.2.0 stored values used coarse family-only buckets. Map to the most recent listed
-  // variant so historical rows can still be priced after upgrade.
-  opus: "opus-4-7",
-  sonnet: "sonnet-4-6",
-};
-
-export function normalizeModel(raw: unknown): ModelKey {
-  if (typeof raw !== "string") return "unknown";
-  const s = raw.toLowerCase().trim();
-  const remap = LEGACY_MODEL_REMAP[s];
-  if (remap) return remap;
-  if (s in DEFAULT_PRICING.pricing) return s as ModelKey;
-  // Long-context marker: explicit [1m] in name OR contains "1m"/"-1m-" alongside the version.
-  const hasLongContext = /\[1m\]|(-|_| )1m(\b|-)/.test(s);
-  const familyMatch = s.match(/(opus|sonnet)/);
-  if (!familyMatch) return "unknown";
-  const family = familyMatch[1];
-  const versionMatch = s.match(/(\d+)[._-]?(\d+)/);
-  if (!versionMatch) return "unknown";
-  const major = versionMatch[1];
-  const minor = versionMatch[2];
-  const candidateBase = `${family}-${major}-${minor}` as ModelKey;
-  const candidate1m = `${candidateBase}-1m` as ModelKey;
-  if (hasLongContext && candidate1m in DEFAULT_PRICING.pricing) return candidate1m;
-  if (candidateBase in DEFAULT_PRICING.pricing) return candidateBase;
-  return "unknown";
 }
 
 function toDay(iso: string): string {
@@ -233,7 +101,7 @@ async function loadAllSnapshots(
 ): Promise<PricingSnapshot[]> {
   const rows = await ctx.db.query<{
     effective_from: string;
-    config_json: NewPricingConfig;
+    config_json: PricingConfig;
     created_at: string;
     created_by: string | null;
     note: string | null;
@@ -261,7 +129,7 @@ async function insertSnapshot(
   ctx: PluginContext,
   companyId: string,
   effectiveFrom: string,
-  config: NewPricingConfig,
+  config: PricingConfig,
   note: string | null,
 ): Promise<void> {
   await ctx.db.execute(
@@ -281,7 +149,7 @@ export async function loadActiveConfig(
   ctx: PluginContext,
   companyId: string,
   occurredAt: string,
-): Promise<NewPricingConfig | null> {
+): Promise<PricingConfig | null> {
   const snapshots = await loadAllSnapshots(ctx, companyId);
   const snap = findActiveSnapshot(snapshots, occurredAt);
   return snap?.config ?? null;
@@ -368,92 +236,6 @@ async function runMigration2_0_0(ctx: PluginContext): Promise<void> {
   ctx.logger.info("migration 2.0.0 complete");
 }
 
-export function isPricingConfig(v: unknown): v is PricingConfig {
-  if (!v || typeof v !== "object") return false;
-  const c = v as Record<string, unknown>;
-  const p = c.pricing as Record<string, unknown> | undefined;
-  if (!p || typeof p !== "object") return false;
-  for (const k of PRICED_MODEL_KEYS) {
-    const r = p[k] as Record<string, unknown> | undefined;
-    if (!r || typeof r.input !== "number" || typeof r.output !== "number") return false;
-  }
-  const margin = c.margin as Record<string, unknown> | undefined;
-  if (
-    !margin ||
-    typeof margin.percent !== "number" ||
-    !Number.isFinite(margin.percent) ||
-    margin.percent < 0 ||
-    margin.percent > 500
-  ) {
-    return false;
-  }
-  // Subscription is optional. If present it must be well-formed; otherwise
-  // it's treated as "off" downstream. Don't fail the type guard on its absence.
-  const sub = c.subscription as { preset?: unknown; divisor?: unknown } | undefined;
-  if (sub !== undefined && sub !== null) {
-    const valid =
-      typeof sub.divisor === "number" &&
-      sub.divisor > 0 &&
-      typeof sub.preset === "string" &&
-      (sub.preset === "off" || sub.preset === "pro" || sub.preset === "max");
-    if (!valid) return false;
-  }
-  return true;
-}
-
-// Upgrade older persisted configs (pre-0.2.0) to the new keyed shape, preserving
-// any operator-set values where possible. Anything we can't map falls back to defaults.
-export function upgradePricingConfig(raw: unknown): PricingConfig {
-  const out: PricingConfig = JSON.parse(JSON.stringify(DEFAULT_PRICING));
-  if (!raw || typeof raw !== "object") return out;
-  const c = raw as Record<string, unknown>;
-  const p = (c.pricing ?? {}) as Record<string, unknown>;
-  for (const k of PRICED_MODEL_KEYS) {
-    const row = p[k] as { input?: unknown; output?: unknown } | undefined;
-    if (row && typeof row.input === "number" && typeof row.output === "number") {
-      out.pricing[k] = { input: row.input, output: row.output };
-    }
-  }
-  // Legacy mappings: a pre-0.2.0 config had flat opus/sonnet/haiku keys.
-  // Copy those forward to their remapped variants only if the operator hasn't already
-  // overridden the new key, so we don't clobber explicit upgrades.
-  const legacyOpus = (p.opus ?? {}) as { input?: unknown; output?: unknown };
-  if (typeof legacyOpus.input === "number" && typeof legacyOpus.output === "number") {
-    if (out.pricing["opus-4-7"].input === DEFAULT_PRICING.pricing["opus-4-7"].input) {
-      out.pricing["opus-4-7"] = { input: legacyOpus.input, output: legacyOpus.output };
-    }
-  }
-  const legacySonnet = (p.sonnet ?? {}) as { input?: unknown; output?: unknown };
-  if (typeof legacySonnet.input === "number" && typeof legacySonnet.output === "number") {
-    if (out.pricing["sonnet-4-6"].input === DEFAULT_PRICING.pricing["sonnet-4-6"].input) {
-      out.pricing["sonnet-4-6"] = { input: legacySonnet.input, output: legacySonnet.output };
-    }
-  }
-  const m = c.margin as { percent?: unknown } | undefined;
-  if (m && typeof m.percent === "number") out.margin.percent = m.percent;
-  // Carry forward subscription if present and valid.
-  const sub = c.subscription as { preset?: unknown; divisor?: unknown } | undefined;
-  if (sub && typeof sub === "object") {
-    const presetRaw = sub.preset;
-    const divisorRaw = sub.divisor;
-    if (
-      (presetRaw === "off" || presetRaw === "pro" || presetRaw === "max") &&
-      typeof divisorRaw === "number" &&
-      divisorRaw > 0
-    ) {
-      out.subscription = { preset: presetRaw, divisor: divisorRaw };
-    } else if (presetRaw === "off" || presetRaw === "pro" || presetRaw === "max") {
-      // Preset valid but divisor missing/garbage → recover from the canonical
-      // map so the operator sees a coherent state instead of "off".
-      out.subscription = {
-        preset: presetRaw,
-        divisor: SUBSCRIPTION_DIVISORS[presetRaw],
-      };
-    }
-  }
-  return out;
-}
-
 // 2.0.0: returns the snapshot active at the GIVEN occurredAt, NOT the
 // most-recent snapshot. Callers that want "current active" pass new Date().toISOString().
 // Exported because the 5 cost-computation handlers now use loadAllSnapshots +
@@ -463,7 +245,7 @@ export async function loadPricing(
   ctx: PluginContext,
   companyId: string,
   occurredAt: string,
-): Promise<NewPricingConfig | null> {
+): Promise<PricingConfig | null> {
   return loadActiveConfig(ctx, companyId, occurredAt);
 }
 
@@ -728,7 +510,7 @@ export function priceFor(
   rawModel: string,
   input: number,
   output: number,
-  cfg: NewPricingConfig,
+  cfg: PricingConfig,
 ): { inputCost: number; outputCost: number } {
   // Wrap as a snapshot so lookupRate (from ./pricing) works without
   // forking the signature for non-snapshot callers.
@@ -847,7 +629,9 @@ async function runBackfill(
         `cost_event:${r.id}`,
         r.company_id,
         r.agent_id,
-        normalizeModel(r.model),
+        // 2.0.0: no normalizer. Store the host's raw payload string verbatim.
+        // Pricing lookup is exact match against the operator's free-form table.
+        String(r.model ?? "unknown"),
         inp + cached,
         out,
         r.occurred_at,
@@ -975,6 +759,10 @@ async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void
 
   const totalInput = inputTokens + cachedInputTokens;
 
+  // 2.0.0: no normalizer. model = raw_model = whatever the host emitted.
+  // Pricing lookup is exact match against the operator's free-form table.
+  const storedModel = typeof model === "string" ? model : "unknown";
+
   await ctx.db.execute(
     `INSERT INTO ${q(ctx, "usage_events")}
        (source_event_id, company_id, agent_id, model, raw_model, provider, source,
@@ -985,8 +773,8 @@ async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void
       sourceEventId,
       companyId,
       agentId,
-      normalizeModel(model),
-      rawModel,
+      storedModel,
+      rawModel ?? storedModel,
       provider,
       source,
       totalInput,
@@ -1113,23 +901,6 @@ export function slugifyForFilename(name: string): string {
     .slice(0, 40);
 }
 
-// Display labels for the CSV — match the UI's MODEL_LABELS so the client's
-// spreadsheet reads "Opus 4.7[1m]" instead of the internal "opus-4-7-1m".
-const CSV_MODEL_LABELS: Record<string, string> = {
-  "opus-4-8": "Opus 4.8",
-  "opus-4-8-1m": "Opus 4.8[1m]",
-  "opus-4-7": "Opus 4.7",
-  "opus-4-7-1m": "Opus 4.7[1m]",
-  "opus-4-6": "Opus 4.6",
-  "opus-4-6-1m": "Opus 4.6[1m]",
-  "opus-4-5": "Opus 4.5",
-  "sonnet-4-6": "Sonnet 4.6",
-  "sonnet-4-6-1m": "Sonnet 4.6[1m]",
-  "sonnet-4-5": "Sonnet 4.5",
-  "sonnet-4-5-1m": "Sonnet 4.5[1m]",
-  "haiku-4-5": "Haiku 4.5",
-};
-
 // Client-facing CSV: one row per (calendar-month, model) showing tokens and
 // the price the client owes — in the operator's chosen billing currency, with
 // margin applied. Doesn't surface the operator's underlying USD cost, the
@@ -1156,7 +927,7 @@ async function buildClientMonthlyCsv(
     month: string;
     month_start: string;
     month_end: string;
-    model: ModelKey;
+    model: string;
     input_tokens: number;
     output_tokens: number;
     billed_usd: number;
@@ -1246,7 +1017,12 @@ async function buildClientMonthlyCsv(
     const priceNative = hasPricing
       ? b.billed_usd * fxRate
       : null;
-    const modelLabel = CSV_MODEL_LABELS[b.model] ?? b.model;
+    // Use the active snapshot's display_name for this model, fall back
+    // to the raw key. Each row in CSV is already grouped by (month, model)
+    // so the snapshot resolves once per row.
+    const snap = findActiveSnapshot(snapshots, `${b.month_end}T12:00:00Z`);
+    const displayName = snap?.config.pricing[b.model]?.display_name ?? b.model;
+    const modelLabel = displayName;
     lines.push(
       [
         b.month,
@@ -1345,7 +1121,7 @@ interface CostsSubscriptionSummary {
 
 interface CostsModelRow {
   rawModel: string;                 // e.g. "claude-opus-4-7[1m]"
-  normalizedKey: ModelKey;          // e.g. "opus-4-7-1m"
+  normalizedKey: string;          // e.g. "opus-4-7-1m"
   provider: string;                 // e.g. "anthropic"
   source: string;                   // e.g. "subscription" | "api"
   tokens: number;
@@ -1357,7 +1133,7 @@ interface CostsModelRow {
 // One row per agent, with a nested per-(rawModel,source) sub-list.
 interface CostsAgentModelRow {
   rawModel: string;                 // e.g. "claude-opus-4-7[1m]"
-  normalizedKey: ModelKey;
+  normalizedKey: string;
   provider: string;
   source: string;
   tokens: number;
@@ -1395,7 +1171,7 @@ function priceTokens(
   rawModel: string,
   input: number,
   output: number,
-  cfg: NewPricingConfig | null,
+  cfg: PricingConfig | null,
 ): number | null {
   if (!cfg) return null;
   const { inputCost, outputCost } = priceFor(rawModel, input, output, cfg);
@@ -1418,7 +1194,7 @@ async function buildCostsOverview(
   const events = await ctx.db.query<{
     agent_id: string | null;
     raw_model: string | null;
-    model: ModelKey;
+    model: string;
     provider: string | null;
     source: string | null;
     input_tokens: number;
@@ -1502,7 +1278,7 @@ async function buildCostsOverview(
     string,
     {
       rawModel: string;
-      normalizedKey: ModelKey;
+      normalizedKey: string;
       provider: string;
       source: string;
       tokens: number;
@@ -1569,7 +1345,7 @@ async function buildCostsOverview(
     hasCost: boolean;
     models: Map<string, {
       rawModel: string;
-      normalizedKey: ModelKey;
+      normalizedKey: string;
       provider: string;
       source: string;
       tokens: number;
@@ -1950,7 +1726,7 @@ const plugin = definePlugin({
       const daily = await readDaily(ctx, companyId, from, to);
 
       const byModel = new Map<
-        ModelKey,
+        string,
         {
           input_tokens: number;
           output_tokens: number;
@@ -2139,7 +1915,7 @@ const plugin = definePlugin({
       if (!companyId) throw new Error("companyId is required");
       const sourceFrom = String(params.source_effective_from ?? "");
       if (!sourceFrom) throw new Error("source_effective_from is required");
-      const [src] = await ctx.db.query<{ config_json: NewPricingConfig }>(
+      const [src] = await ctx.db.query<{ config_json: PricingConfig }>(
         `SELECT config_json FROM ${q(ctx, "pricing_config_history")}
           WHERE company_id = $1 AND effective_from = $2::timestamptz`,
         [companyId, sourceFrom],
@@ -2251,7 +2027,7 @@ const plugin = definePlugin({
       // in memory below.
       const rows = await ctx.db.query<{
         agent_id: string | null;
-        model: ModelKey;
+        model: string;
         day: string;
         runs: number | string;
         input_tokens: number | string;
@@ -2287,19 +2063,13 @@ const plugin = definePlugin({
       }
 
       const fxRate = fx?.rate ?? 1;
-      // 1.x exposed a subscription divisor on the response; 2.0 folds that
-      // into priceFor via effective_input_rate_multiplier per snapshot. Keep
-      // the response shape for UI compatibility, surfacing the most-recent
-      // snapshot's multiplier as the "current" divisor (1/multiplier).
+      // 2.0.0: the 1.x subscription preset is gone. The UI in Task 8 drops
+      // the preset dropdown entirely; the multiplier lives on each snapshot.
+      // Surface only marginPercent as a header informational value.
       const latestCfg = snapshots[0]?.config ?? null;
-      const latestMult = latestCfg?.effective_input_rate_multiplier ?? 1;
-      const subEnabled = latestMult !== 1;
-      const subscriptionDivisorOut = latestMult > 0 ? 1 / latestMult : 1;
-      const subscriptionPresetOut: SubscriptionPreset =
-        latestMult === 1 ? "off" : latestMult === 0.2 ? "pro" : latestMult === 0.05 ? "max" : "off";
 
       type ModelLine = {
-        model: ModelKey;
+        model: string;
         runs: number;
         input_tokens: number;
         output_tokens: number;
@@ -2312,8 +2082,8 @@ const plugin = definePlugin({
         agentId: string | null;
         agentName: string;
         // Keyed by model to merge per-day rows into a single per-model line.
-        modelMap: Map<ModelKey, {
-          model: ModelKey;
+        modelMap: Map<string, {
+          model: string;
           runs: number;
           input_tokens: number;
           output_tokens: number;
@@ -2475,11 +2245,6 @@ const plugin = definePlugin({
         fxDay: fx?.day ?? null,
         fxSource: fx?.source ?? null,
         marginPercent: latestCfg?.margin.percent ?? 0,
-        subscription: {
-          enabled: subEnabled,
-          preset: subscriptionPresetOut,
-          divisor: subscriptionDivisorOut,
-        },
         rows: result,
       };
     });
@@ -2533,12 +2298,11 @@ const plugin = definePlugin({
       return { ...result, from, to };
     });
 
-    // Re-normalize stored `usage_events.model` values against the current
-    // normalizeModel implementation. Useful after a plugin update widens
-    // the priced model table — previously-ingested rows are sitting in the
-    // database with `model='unknown'`, but their `raw_model` is preserved
-    // so we can compute the correct key and update in place. Re-rolls every
-    // (company, day) pair that had at least one row change. Idempotent.
+    // 2.0.0: there's no normalizer. This action now syncs `model` to
+    // `raw_model` for any row where they diverge — useful as a manual
+    // recovery if the 2.0.0 auto-migration missed rows (or the operator
+    // manually corrected raw_model values). Re-rolls every (company, day)
+    // pair that had at least one row change. Idempotent.
     ctx.actions.register("renormalizeStaleModels", async (params) => {
       const companyFilter = String(params.companyId ?? "");
       const where = companyFilter
@@ -2561,7 +2325,7 @@ const plugin = definePlugin({
       let updated = 0;
       const affected = new Set<string>();
       for (const r of rows) {
-        const next = normalizeModel(r.raw_model);
+        const next = r.raw_model;
         if (next !== r.model) {
           await ctx.db.execute(
             `UPDATE ${q(ctx, "usage_events")}
@@ -2660,7 +2424,9 @@ const plugin = definePlugin({
     });
 
     // Diagnostic: surface the distinct raw_model values stored in
-    // usage_events so an operator can see what the normalizer is fed.
+    // usage_events. 2.0.0 stores raw_model verbatim — would_normalize_to
+    // is preserved in the response shape for back-compat with 1.x callers
+    // but is now just the raw_model itself (no normalization happens).
     ctx.data.register("sampleRawModels", async (params) => {
       const companyId = String(params.companyId ?? "");
       const where = companyId
@@ -2686,7 +2452,7 @@ const plugin = definePlugin({
         rows: rows.map((r) => ({
           raw_model: r.raw_model,
           stored_model: r.stored_model,
-          would_normalize_to: normalizeModel(r.raw_model),
+          would_normalize_to: r.raw_model,
           count: r.rowcount,
         })),
       };
