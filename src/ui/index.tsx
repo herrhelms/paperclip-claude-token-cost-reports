@@ -121,153 +121,72 @@ type DailyRow = {
   billable_usd?: number | null;
 };
 
-// Model keys mirror the worker's PRICED_MODEL_KEYS. Keep in sync.
-type ModelKey =
-  | "opus-4-8"
-  | "opus-4-8-1m"
-  | "opus-4-7"
-  | "opus-4-7-1m"
-  | "opus-4-6"
-  | "opus-4-6-1m"
-  | "opus-4-5"
-  | "sonnet-4-6"
-  | "sonnet-4-6-1m"
-  | "sonnet-4-5"
-  | "sonnet-4-5-1m"
-  | "haiku-4-5";
-
-const PRICED_MODEL_KEYS: ReadonlyArray<ModelKey> = [
-  "opus-4-8",
-  "opus-4-8-1m",
-  "opus-4-7",
-  "opus-4-7-1m",
-  "opus-4-6",
-  "opus-4-6-1m",
-  "opus-4-5",
-  "sonnet-4-6",
-  "sonnet-4-6-1m",
-  "sonnet-4-5",
-  "sonnet-4-5-1m",
-  "haiku-4-5",
-];
-
-type SubscriptionPreset = "off" | "pro" | "max";
-
-const SUBSCRIPTION_PRESETS: ReadonlyArray<{
-  key: SubscriptionPreset;
-  divisor: number;
-  label: string;
-}> = [
-  { key: "off", divisor: 1,  label: "Off — bill full list price" },
-  { key: "pro", divisor: 5,  label: "Claude Pro (÷5)" },
-  { key: "max", divisor: 20, label: "Claude Max (÷20)" },
-];
-
+// 2.0.0: pricing is free-form. The fixed ModelKey union and
+// PRICED_MODEL_KEYS array are gone — the UI consumes whatever
+// `getPricing` returns and renders Object.entries(pricing).
+type RateRow = { input: number; output: number; display_name?: string };
 type PricingConfig = {
-  pricing: Record<ModelKey, { input: number; output: number }>;
+  pricing: Record<string, RateRow>;
   margin: { percent: number };
-  subscription?: {
-    preset: SubscriptionPreset;
-    divisor: number;
-  };
+  effective_input_rate_multiplier?: number;
 };
 
-// Defaults from https://platform.claude.com/docs/en/about-claude/pricing
-// 2026-06-20 fetch. Per the "Long context pricing" section, Opus 4.6 / 4.7 / 4.8
-// and Sonnet 4.6 include the full 1M context window at STANDARD pricing — the
-// -1m rows share the base rate. Opus 4.5 and Haiku 4.5 don't have a 1M variant.
-// Operators can override any row in Settings.
-const DEFAULT_PRICING: PricingConfig = {
-  pricing: {
-    "opus-4-8":      { input: 5,    output: 25 },
-    "opus-4-8-1m":   { input: 5,    output: 25 },
-    "opus-4-7":      { input: 5,    output: 25 },
-    "opus-4-7-1m":   { input: 5,    output: 25 },
-    "opus-4-6":      { input: 5,    output: 25 },
-    "opus-4-6-1m":   { input: 5,    output: 25 },
-    "opus-4-5":      { input: 5,    output: 25 },
-    "sonnet-4-6":    { input: 3,    output: 15 },
-    "sonnet-4-6-1m": { input: 3,    output: 15 },
-    "sonnet-4-5":    { input: 3,    output: 15 },
-    "sonnet-4-5-1m": { input: 3,    output: 15 },
-    "haiku-4-5":     { input: 1,    output: 5  },
-  },
+// Empty fallback used only until getPricing resolves. The worker
+// returns DEFAULT_SEED_PRICING for fresh installs, so this is just
+// the React initial state placeholder.
+const EMPTY_PRICING: PricingConfig = {
+  pricing: {},
   margin: { percent: 0 },
-  subscription: { preset: "off", divisor: 1 },
-};
-
-// Display labels for the settings table. Match the user's requested format: "Opus 4.8", "Opus 4.8[1m]".
-const MODEL_LABELS: Record<ModelKey, string> = {
-  "opus-4-8":      "Opus 4.8",
-  "opus-4-8-1m":   "Opus 4.8[1m]",
-  "opus-4-7":      "Opus 4.7",
-  "opus-4-7-1m":   "Opus 4.7[1m]",
-  "opus-4-6":      "Opus 4.6",
-  "opus-4-6-1m":   "Opus 4.6[1m]",
-  "opus-4-5":      "Opus 4.5",
-  "sonnet-4-6":    "Sonnet 4.6",
-  "sonnet-4-6-1m": "Sonnet 4.6[1m]",
-  "sonnet-4-5":    "Sonnet 4.5",
-  "sonnet-4-5-1m": "Sonnet 4.5[1m]",
-  "haiku-4-5":     "Haiku 4.5",
+  effective_input_rate_multiplier: 1,
 };
 
 function normalizePricing(raw: unknown): PricingConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const p = r.pricing as Record<string, unknown> | undefined;
-  if (!p) return null;
-  const out: PricingConfig = JSON.parse(JSON.stringify(DEFAULT_PRICING));
-  for (const k of PRICED_MODEL_KEYS) {
-    const row = p[k] as { input?: unknown; output?: unknown } | undefined;
-    if (row && typeof row.input === "number" && typeof row.output === "number") {
-      out.pricing[k] = { input: row.input, output: row.output };
+  // The worker's getPricing returns { pricing, hasSnapshot }. Unwrap if needed.
+  const source =
+    "pricing" in r && r.pricing && typeof r.pricing === "object"
+      ? r
+      : null;
+  if (!source) return null;
+  const p = source.pricing as Record<string, unknown>;
+  const out: PricingConfig = {
+    pricing: {},
+    margin: { percent: 0 },
+    effective_input_rate_multiplier: 1,
+  };
+  for (const [key, row] of Object.entries(p)) {
+    if (!row || typeof row !== "object") continue;
+    const r2 = row as Record<string, unknown>;
+    if (typeof r2.input !== "number" || typeof r2.output !== "number") continue;
+    const next: RateRow = { input: r2.input, output: r2.output };
+    if (typeof r2.display_name === "string" && r2.display_name.length > 0) {
+      next.display_name = r2.display_name;
     }
+    out.pricing[key] = next;
   }
-  // Legacy: pre-0.2.0 configs had flat opus/sonnet/haiku keys.
-  // Carry forward into the most-recent base variant if the operator hasn't set the new key yet.
-  const legacyOpus = p.opus as { input?: unknown; output?: unknown } | undefined;
-  if (
-    legacyOpus &&
-    typeof legacyOpus.input === "number" &&
-    typeof legacyOpus.output === "number" &&
-    out.pricing["opus-4-7"].input === DEFAULT_PRICING.pricing["opus-4-7"].input
-  ) {
-    out.pricing["opus-4-7"] = { input: legacyOpus.input, output: legacyOpus.output };
-  }
-  const legacySonnet = p.sonnet as { input?: unknown; output?: unknown } | undefined;
-  if (
-    legacySonnet &&
-    typeof legacySonnet.input === "number" &&
-    typeof legacySonnet.output === "number" &&
-    out.pricing["sonnet-4-6"].input === DEFAULT_PRICING.pricing["sonnet-4-6"].input
-  ) {
-    out.pricing["sonnet-4-6"] = { input: legacySonnet.input, output: legacySonnet.output };
-  }
-  const m = r.margin as { percent?: unknown } | undefined;
+  const m = source.margin as { percent?: unknown } | undefined;
   if (m && typeof m.percent === "number") {
     out.margin.percent = m.percent;
-  } else if (typeof (r as { marginPercent?: unknown }).marginPercent === "number") {
-    // tolerate old flat shape if any was persisted
-    out.margin.percent = (r as { marginPercent: number }).marginPercent;
+  } else if (typeof (source as { marginPercent?: unknown }).marginPercent === "number") {
+    out.margin.percent = (source as { marginPercent: number }).marginPercent;
   }
-  // Subscription mode is optional (added in 0.7.0). Default to "off" when
-  // missing or malformed so pre-0.7.0 configs keep showing full list price.
-  const sub = r.subscription as
-    | { preset?: unknown; divisor?: unknown }
-    | undefined;
-  if (sub && (sub.preset === "off" || sub.preset === "pro" || sub.preset === "max")) {
-    const divisor =
-      typeof sub.divisor === "number" && sub.divisor > 0
-        ? sub.divisor
-        : sub.preset === "pro"
-          ? 5
-          : sub.preset === "max"
-            ? 20
-            : 1;
-    out.subscription = { preset: sub.preset, divisor };
+  const mult = (source as { effective_input_rate_multiplier?: unknown })
+    .effective_input_rate_multiplier;
+  if (typeof mult === "number" && Number.isFinite(mult) && mult > 0) {
+    out.effective_input_rate_multiplier = mult;
   }
   return out;
+}
+
+// Helper: derive a display label for a raw model id by checking the
+// active pricing config's display_name field. Falls back to the raw
+// id when no override is set.
+function modelLabel(rawModel: string, cfg: PricingConfig | null | undefined): string {
+  if (cfg && cfg.pricing[rawModel]?.display_name) {
+    return cfg.pricing[rawModel].display_name as string;
+  }
+  return rawModel;
 }
 
 function isoDateOffset(daysAgo: number): string {
@@ -754,12 +673,10 @@ type PerAgentResponse = {
   fxDay: string | null;
   fxSource: string | null;
   marginPercent: number;
-  // Optional for back-compat with workers older than 0.7.0.
-  subscription?: {
-    enabled: boolean;
-    preset: SubscriptionPreset;
-    divisor: number;
-  };
+  // 2.0.0: subscription preset replaced by effective_input_rate_multiplier.
+  // Kept optional for back-compat with workers that haven't started
+  // surfacing it yet.
+  effectiveInputRateMultiplier?: number;
   rows: PerAgentBlock[];
 };
 
@@ -785,9 +702,9 @@ function BillingConfigStrip(props: {
   fxDay: string | null;
   fxSource: string | null;
   marginPercent: number | null;
-  subscription:
-    | { enabled: boolean; preset: SubscriptionPreset; divisor: number }
-    | null;
+  // 2.0.0: subscription preset replaced by a single multiplier knob.
+  // null = unknown / no pricing config; 1.0 = full list price.
+  effectiveInputRateMultiplier: number | null;
   priced: boolean;
   settingsLinkProps: SettingsLinkProps;
 }): JSX.Element {
@@ -799,19 +716,21 @@ function BillingConfigStrip(props: {
     fxDay,
     fxSource,
     marginPercent,
-    subscription,
+    effectiveInputRateMultiplier,
     priced,
     settingsLinkProps,
   } = props;
-  const subLabel = subscription?.enabled
-    ? `${
-        subscription.preset === "max"
-          ? "Claude Max"
-          : subscription.preset === "pro"
-            ? "Claude Pro"
-            : `Custom`
-      } (÷${subscription.divisor})`
-    : "Off (full list price)";
+  const mult = effectiveInputRateMultiplier;
+  const subLabel =
+    mult === null || !Number.isFinite(mult)
+      ? "—"
+      : mult === 1
+        ? "Off (full list price)"
+        : mult === 0.2
+          ? "Claude Pro (×0.2 ≈ ÷5)"
+          : mult === 0.05
+            ? "Claude Max (×0.05 ≈ ÷20)"
+            : `Custom (×${mult})`;
 
   const cell: React.CSSProperties = {
     display: "flex",
@@ -918,7 +837,7 @@ function BillingConfigStrip(props: {
         </span>
       </div>
       <div style={cell}>
-        <span style={labelStyle}>Subscription</span>
+        <span style={labelStyle}>Input rate</span>
         <span style={valueStyle}>{subLabel}</span>
       </div>
       <div style={{ ...cell, marginLeft: "auto" }}>
@@ -1055,6 +974,7 @@ function PerModelCard(props: {
   rows: PerModelRow[] | null;
   priced: boolean;
   currency: CurrencyCode;
+  pricingConfig: PricingConfig | null;
   settingsLinkProps: SettingsLinkProps;
 }) {
   if (props.loading) {
@@ -1102,8 +1022,7 @@ function PerModelCard(props: {
             r.total_tokens > 0 ? r.input_tokens / r.total_tokens : 0;
           const inputPct = totalPct * inputShare;
           const outputPct = totalPct * (1 - inputShare);
-          const label =
-            (MODEL_LABELS as Record<string, string>)[r.model] ?? r.model;
+          const label = modelLabel(r.model, props.pricingConfig);
           return (
             <div key={r.model} style={styles.modelRow}>
               <div style={styles.modelLabel}>{label}</div>
@@ -1143,6 +1062,7 @@ function PerModelCard(props: {
 function PerAgentCard(props: {
   loading: boolean;
   data: PerAgentResponse | null;
+  pricingConfig: PricingConfig | null;
   settingsLinkProps: SettingsLinkProps;
 }) {
   if (props.loading) {
@@ -1272,8 +1192,7 @@ function PerAgentCard(props: {
                       <span style={{ color: "var(--muted-foreground)", marginRight: 8 }}>
                         └
                       </span>
-                      {(MODEL_LABELS as Record<string, string>)[m.model] ??
-                        m.model}
+                      {modelLabel(m.model, props.pricingConfig)}
                     </td>
                     <td style={subRowCell}>{fmtInt(m.runs)}</td>
                     <td style={subRowCell}>{fmtTokens(m.input_tokens)}</td>
@@ -1305,13 +1224,13 @@ function PerAgentCard(props: {
       ) : (
         <div style={{ marginTop: 12, fontSize: 11, color: "var(--muted-foreground)" }}>
           {(() => {
-            const subEnabled = !!d?.subscription?.enabled;
-            const subDivisor = d?.subscription?.divisor ?? 1;
-            return subEnabled ? (
+            const mult = d?.effectiveInputRateMultiplier ?? 1;
+            const adjusted = mult !== 1;
+            return adjusted ? (
               <>
                 <strong>List</strong> = tokens × per-1M API rate ·{" "}
-                <strong>Client price</strong> = List ÷ {subDivisor} × (1 +
-                margin {d?.marginPercent ?? 0}%)
+                <strong>Client price</strong> = List × {mult} × (1 + margin{" "}
+                {d?.marginPercent ?? 0}%)
               </>
             ) : (
               <>
@@ -1545,7 +1464,17 @@ export function UsagePage(): JSX.Element {
     () => normalizePricing(pricing.data),
     [pricing.data],
   );
-  const hasPricing = !!pricingConfig;
+  // hasSnapshot is the worker's signal that the operator (or auto-migration)
+  // has persisted at least one pricing snapshot. When false the UI still has
+  // a default pricing config to render, but the dashboard's KPI cards stay
+  // in "no pricing configured" mode.
+  const hasPricing = useMemo(() => {
+    const d = pricing.data;
+    if (d && typeof d === "object" && "hasSnapshot" in (d as object)) {
+      return Boolean((d as { hasSnapshot?: unknown }).hasSnapshot);
+    }
+    return !!pricingConfig;
+  }, [pricing.data, pricingConfig]);
   const currency: CurrencyCode = (daily.data?.currency ??
     perModel.data?.currency ??
     perAgent.data?.currency ??
@@ -1876,34 +1805,29 @@ export function UsagePage(): JSX.Element {
         fxDay={perAgent.data?.fxDay ?? perModel.data?.fxDay ?? daily.data?.fxDay ?? null}
         fxSource={perAgent.data?.fxSource ?? perModel.data?.fxSource ?? null}
         marginPercent={pricingConfig?.margin?.percent ?? perAgent.data?.marginPercent ?? null}
-        subscription={
-          pricingConfig?.subscription
-            ? {
-                enabled: pricingConfig.subscription.preset !== "off",
-                preset: pricingConfig.subscription.preset,
-                divisor: pricingConfig.subscription.divisor,
-              }
-            : perAgent.data?.subscription ?? null
+        effectiveInputRateMultiplier={
+          pricingConfig?.effective_input_rate_multiplier ??
+          perAgent.data?.effectiveInputRateMultiplier ??
+          null
         }
         priced={hasPricing}
         settingsLinkProps={settingsLinkProps}
       />
 
       {(() => {
-        // KPI labels are stable regardless of subscription/margin config — the
+        // KPI labels are stable regardless of multiplier/margin config — the
         // label describes WHAT the number is, not which knobs produced it.
-        //   List price = tokens × per-1M API rate (no subscription, no margin)
-        //   Your cost  = list ÷ subscriptionDivisor (post-sub, pre-margin)
+        //   List price = tokens × per-1M API rate (no multiplier, no margin)
+        //   Your cost  = list × effective_input_rate_multiplier
         //   Client price = your cost × (1 + margin/100)
-        // When the operator runs without a subscription, "Your cost" = "List
-        // price" — that's correct and transparently signals the config.
-        const subEnabled =
-          (pricingConfig?.subscription?.preset ?? "off") !== "off";
-        const subDivisor = pricingConfig?.subscription?.divisor ?? 1;
+        // When the multiplier is 1.0, "Your cost" = "List price" — that's
+        // correct and transparently signals the config.
+        const mult = pricingConfig?.effective_input_rate_multiplier ?? 1;
+        const subAdjusted = mult !== 1;
         const marginPct = pricingConfig?.margin?.percent ?? 0;
-        const yourCostFormula = subEnabled
-          ? `List ÷ ${subDivisor} (subscription discount applied)`
-          : "Equal to List — no subscription discount configured";
+        const yourCostFormula = subAdjusted
+          ? `List × ${mult} (effective_input_rate_multiplier applied)`
+          : "Equal to List — multiplier is 1.0";
         const clientPriceFormula = `Your cost × (1 + ${marginPct}% margin)`;
         return (
           <div className="tu-kpi-row" style={styles.kpiRow}>
@@ -1956,9 +1880,9 @@ export function UsagePage(): JSX.Element {
               sub={
                 hasPricing ? (
                   <span style={styles.kpiSub} title={yourCostFormula}>
-                    {subEnabled
-                      ? `after subscription ÷${subDivisor}`
-                      : "no subscription discount"}
+                    {subAdjusted
+                      ? `after multiplier ×${mult}`
+                      : "no multiplier adjustment"}
                   </span>
                 ) : undefined
               }
@@ -1989,6 +1913,7 @@ export function UsagePage(): JSX.Element {
         rows={perModel.data?.rows ?? null}
         priced={!!perModel.data?.priced}
         currency={currency}
+        pricingConfig={pricingConfig}
         settingsLinkProps={settingsLinkProps}
       />
 
@@ -1996,6 +1921,7 @@ export function UsagePage(): JSX.Element {
       <PerAgentCard
         loading={perAgent.loading}
         data={perAgent.data ?? null}
+        pricingConfig={pricingConfig}
         settingsLinkProps={settingsLinkProps}
       />
 
@@ -2012,10 +1938,9 @@ export function UsagePage(): JSX.Element {
         <div style={{ fontSize: 12, color: "var(--muted-foreground)" }}>
           {hasPricing && pricingConfig ? (
             <>
-              Pricing configured. Opus 4.8 $
-              {pricingConfig.pricing["opus-4-8"].input}/$
-              {pricingConfig.pricing["opus-4-8"].output} per 1M tokens; margin{" "}
-              {pricingConfig.margin.percent}%.{" "}
+              Pricing configured: {Object.keys(pricingConfig.pricing).length}{" "}
+              model rate{Object.keys(pricingConfig.pricing).length === 1 ? "" : "s"};
+              margin {pricingConfig.margin.percent}%.{" "}
               <a {...settingsLinkProps} style={styles.link}>
                 Edit rates →
               </a>
@@ -2054,7 +1979,7 @@ export function SettingsPage(): JSX.Element {
   const refreshFxAction = usePluginAction("refreshFxNow");
   const toast = usePluginToast();
 
-  const [config, setConfig] = useState<PricingConfig>(DEFAULT_PRICING);
+  const [config, setConfig] = useState<PricingConfig>(EMPTY_PRICING);
   const [saving, setSaving] = useState(false);
   const [savingCurrency, setSavingCurrency] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
@@ -2063,21 +1988,6 @@ export function SettingsPage(): JSX.Element {
     const normalized = normalizePricing(pricing.data);
     if (normalized) setConfig(normalized);
   }, [pricing.data]);
-
-  const updateRate = (
-    model: ModelKey,
-    field: "input" | "output",
-    value: string,
-  ) => {
-    const n = Number(value);
-    setConfig((c) => ({
-      ...c,
-      pricing: {
-        ...c.pricing,
-        [model]: { ...c.pricing[model], [field]: isFinite(n) ? n : 0 },
-      },
-    }));
-  };
 
   const save = async () => {
     setSaving(true);
@@ -2158,16 +2068,9 @@ export function SettingsPage(): JSX.Element {
     );
   }
 
-  const models: { key: ModelKey; label: string }[] = PRICED_MODEL_KEYS.map(
-    (key) => ({ key, label: MODEL_LABELS[key] }),
+  const sortedRows = Object.entries(config.pricing).sort(([a], [b]) =>
+    a.localeCompare(b),
   );
-
-  const resetToDefaults = () => {
-    setConfig((c) => ({
-      ...c,
-      pricing: JSON.parse(JSON.stringify(DEFAULT_PRICING.pricing)),
-    }));
-  };
 
   return (
     <div className="tu-root" style={styles.page}><ThemeStyles />
@@ -2209,45 +2112,168 @@ export function SettingsPage(): JSX.Element {
       <table style={{ ...styles.table, marginTop: 16 }}>
         <thead>
           <tr>
-            <th style={styles.th}>Model</th>
-            <th style={styles.th}>Input $/1M</th>
-            <th style={styles.th}>Output $/1M</th>
+            <th style={styles.th}>Model key</th>
+            <th style={styles.th}>Display name</th>
+            <th style={styles.th}>Input $/MTok</th>
+            <th style={styles.th}>Output $/MTok</th>
+            <th style={styles.th}></th>
           </tr>
         </thead>
         <tbody>
-          {models.map((m) => (
-            <tr key={m.key}>
-              <td style={styles.td}>{m.label}</td>
+          {sortedRows.map(([key, row]) => (
+            <tr key={key}>
+              <td style={styles.td}>
+                <code>{key}</code>
+              </td>
               <td style={styles.td}>
                 <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={config.pricing[m.key].input}
+                  type="text"
+                  value={row.display_name ?? ""}
+                  placeholder={key}
                   onChange={(e) =>
-                    updateRate(m.key, "input", e.target.value)
+                    setConfig((c) => ({
+                      ...c,
+                      pricing: {
+                        ...c.pricing,
+                        [key]: {
+                          ...c.pricing[key],
+                          display_name: e.target.value || undefined,
+                        },
+                      },
+                    }))
                   }
-                  style={{ ...styles.input, width: 120 }}
-                  aria-label={`${m.label} input price per 1M tokens`}
+                  style={{ ...styles.input, width: 200 }}
+                  aria-label={`Display name for ${key}`}
                 />
               </td>
               <td style={styles.td}>
                 <input
                   type="number"
-                  step="0.1"
+                  step="0.01"
                   min="0"
-                  value={config.pricing[m.key].output}
+                  value={row.input}
                   onChange={(e) =>
-                    updateRate(m.key, "output", e.target.value)
+                    setConfig((c) => ({
+                      ...c,
+                      pricing: {
+                        ...c.pricing,
+                        [key]: {
+                          ...c.pricing[key],
+                          input: Number(e.target.value) || 0,
+                        },
+                      },
+                    }))
                   }
                   style={{ ...styles.input, width: 120 }}
-                  aria-label={`${m.label} output price per 1M tokens`}
+                  aria-label={`${key} input price per 1M tokens`}
                 />
+              </td>
+              <td style={styles.td}>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={row.output}
+                  onChange={(e) =>
+                    setConfig((c) => ({
+                      ...c,
+                      pricing: {
+                        ...c.pricing,
+                        [key]: {
+                          ...c.pricing[key],
+                          output: Number(e.target.value) || 0,
+                        },
+                      },
+                    }))
+                  }
+                  style={{ ...styles.input, width: 120 }}
+                  aria-label={`${key} output price per 1M tokens`}
+                />
+              </td>
+              <td style={styles.td}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setConfig((c) => {
+                      const next = { ...c.pricing };
+                      delete next[key];
+                      return { ...c, pricing: next };
+                    })
+                  }
+                  aria-label={`Delete rate for ${key}`}
+                  title={`Delete rate for ${key}`}
+                  style={styles.btn}
+                >
+                  ×
+                </button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+
+      {/* Add rate form — operator can introduce a new model id at any time. */}
+      <form
+        data-add-rate
+        onSubmit={(e) => {
+          e.preventDefault();
+          const fd = new FormData(e.currentTarget);
+          const key = String(fd.get("key") ?? "").trim();
+          const input = Number(fd.get("input") ?? 0);
+          const output = Number(fd.get("output") ?? 0);
+          const display_name =
+            String(fd.get("display_name") ?? "").trim() || undefined;
+          if (!key) return;
+          setConfig((c) => ({
+            ...c,
+            pricing: {
+              ...c.pricing,
+              [key]: { input, output, display_name },
+            },
+          }));
+          (e.currentTarget as HTMLFormElement).reset();
+        }}
+        style={{
+          marginTop: 12,
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        <input
+          name="key"
+          placeholder="model id (e.g. claude-opus-4-9)"
+          required
+          style={{ ...styles.input, minWidth: 240 }}
+        />
+        <input
+          name="display_name"
+          placeholder="display name (optional)"
+          style={{ ...styles.input, minWidth: 200 }}
+        />
+        <input
+          name="input"
+          type="number"
+          step="0.01"
+          min="0"
+          placeholder="input $/MTok"
+          required
+          style={{ ...styles.input, width: 140 }}
+        />
+        <input
+          name="output"
+          type="number"
+          step="0.01"
+          min="0"
+          placeholder="output $/MTok"
+          required
+          style={{ ...styles.input, width: 140 }}
+        />
+        <button type="submit" style={styles.btn}>
+          Add rate
+        </button>
+      </form>
 
       {/* Billing currency + FX status */}
       <div
@@ -2341,39 +2367,37 @@ export function SettingsPage(): JSX.Element {
       </div>
 
       <div style={{ marginTop: 20 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <label
             style={{ fontSize: 13, color: "var(--tu-fg)" }}
-            htmlFor="subscription-preset"
+            htmlFor="effective-input-rate-multiplier"
           >
-            Subscription
+            Effective input rate multiplier
           </label>
-          <select
-            id="subscription-preset"
-            value={config.subscription?.preset ?? "off"}
-            onChange={(e) => {
-              const preset = e.target.value as SubscriptionPreset;
-              const match =
-                SUBSCRIPTION_PRESETS.find((p) => p.key === preset) ??
-                SUBSCRIPTION_PRESETS[0];
+          <input
+            id="effective-input-rate-multiplier"
+            type="number"
+            step="0.01"
+            min="0.01"
+            max="1"
+            value={config.effective_input_rate_multiplier ?? 1}
+            onChange={(e) =>
               setConfig((c) => ({
                 ...c,
-                subscription: { preset: match.key, divisor: match.divisor },
-              }));
-            }}
-            style={{ ...styles.input, width: 240 }}
-          >
-            {SUBSCRIPTION_PRESETS.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+                effective_input_rate_multiplier: Number(e.target.value) || 1,
+              }))
+            }
+            style={{ ...styles.input, width: 140 }}
+          />
+          <span style={styles.kpiSub}>
+            Default 1.0 = full list price. Set to 0.2 if you're on Claude Pro
+            (÷5), 0.05 for Max (÷20).
+          </span>
         </div>
 
-        {/* Grain-of-salt callout — surfaces the same caveat as the README's
-            Subscription-mode section, right where the operator is choosing
-            the preset. Visually distinct from muted body text. */}
+        {/* Grain-of-salt callout — same caveat as the README's
+            multiplier section, right where the operator picks the number.
+            Visually distinct from muted body text. */}
         <div
           style={{
             marginTop: 12,
@@ -2387,15 +2411,15 @@ export function SettingsPage(): JSX.Element {
             borderRadius: 4,
           }}
         >
-          <strong>The ÷5 / ÷20 divisors are an approximation, not an
-          Anthropic rate.</strong> Anthropic does not publish per-token costs
-          for Pro or Max subscriptions; what a subscription user effectively
-          pays per token varies with monthly usage. These divisors are
-          pragmatic stand-ins so a flat-rate account can flow through the same
-          billing pipeline as raw API usage — they are NOT a recovered
-          Anthropic price formula. If your contract or workload diverges
-          materially from <code>list ÷ divisor</code>, override the per-model
-          rates above and leave this preset at <strong>Off</strong>.
+          <strong>The multiplier is an approximation, not an Anthropic
+          rate.</strong> Anthropic does not publish per-token costs for Pro or
+          Max subscriptions; what a subscription user effectively pays per
+          token varies with monthly usage. The 0.2 / 0.05 values are pragmatic
+          stand-ins so a flat-rate account can flow through the same billing
+          pipeline as raw API usage — they are NOT a recovered Anthropic price
+          formula. If your contract or workload diverges materially from{" "}
+          <code>list × multiplier</code>, override the per-model rates above
+          and leave the multiplier at <strong>1.0</strong>.
         </div>
 
         <p
@@ -2406,11 +2430,11 @@ export function SettingsPage(): JSX.Element {
             maxWidth: 640,
           }}
         >
-          When active, the chargeback column on the dashboard is divided by
-          the preset's multiplier before margin is applied. The list-price
-          column stays unchanged so you can see the gap.
+          The chargeback column on the dashboard is scaled by this multiplier
+          before margin is applied. The list-price column stays unchanged so
+          you can see the gap.
           <br />
-          Example: $100 tokens · Pro (÷5) · 10% margin → cost $20 → price{" "}
+          Example: $100 tokens · multiplier 0.2 · 10% margin → cost $20 → price{" "}
           <strong>$22</strong>. At 0.80 EUR/USD, that's <strong>€17.60</strong>.
         </p>
       </div>
@@ -2422,14 +2446,6 @@ export function SettingsPage(): JSX.Element {
           disabled={saving}
         >
           {saving ? "Saving…" : "Save"}
-        </button>
-        <button
-          style={styles.btn}
-          onClick={resetToDefaults}
-          disabled={saving}
-          title="Restore the bundled Anthropic list prices for all 8 rows"
-        >
-          Reset to defaults
         </button>
       </div>
     </div>
