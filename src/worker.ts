@@ -1520,7 +1520,7 @@ const plugin = definePlugin({
     });
 
     // Cleanup hook: when a company's status flips to "archived" we purge its
-    // rows from usage_events, usage_daily, pricing_config, and the
+    // rows from usage_events, usage_daily, pricing_config_history, and the
     // company-scoped state so we don't keep stale references after the
     // operator removes the company. Idempotent — re-firing on subsequent
     // company.updated events just DELETEs zero rows.
@@ -1539,8 +1539,8 @@ const plugin = definePlugin({
           `DELETE FROM ${q(ctx, "usage_daily")} WHERE company_id = $1`,
           [companyId],
         );
-        const pc = await ctx.db.execute(
-          `DELETE FROM ${q(ctx, "pricing_config")} WHERE company_id = $1`,
+        const pch = await ctx.db.execute(
+          `DELETE FROM ${q(ctx, "pricing_config_history")} WHERE company_id = $1`,
           [companyId],
         );
         // Best-effort state cleanup. Failures here are logged but not fatal —
@@ -1559,7 +1559,7 @@ const plugin = definePlugin({
           companyId,
           usageEvents: ev.rowCount,
           usageDaily: da.rowCount,
-          pricingConfig: pc.rowCount,
+          pricingHistory: pch.rowCount,
         });
       } catch (err) {
         ctx.logger.warn("archived company cleanup failed", {
