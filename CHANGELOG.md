@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-20
+### Changed
+- Settings page now surfaces a prominent caveat next to the subscription preset: the ÷5 / ÷20 divisors are pragmatic stand-ins, not Anthropic-published per-token rates. Same caveat that the README has carried since 1.0.0 — now visible where the operator actually chooses the preset.
+- README: editorial rewrite. Tagline + lead paragraph no longer gatekeep the plugin behind "Claude Pro / Max subscription"; the subscription-mode toggle is presented as optional throughout. "Subscription mode" section now leads with the grain-of-salt warning instead of burying it as a footer. Quick start step 4 is explicit about the approximation. "What it does" tightened around the architectural fixes shipped in 1.0.0 (provider filter, atomic rollup, FX bounds).
+- Plugin manifest description rewritten to lead with the billing-CSV outcome instead of the model list, and to mention subscription mode as optional / approximate rather than as the headline use case.
+
 ## [1.0.1] - 2026-06-20
 ### Fixed
 - Worker bundle now includes `@paperclipai/plugin-sdk` instead of treating it as external. The 1.0.0 release relied on the SDK being in the worker's Node resolution chain, which holds in local dev but fails when paperclipai installs the plugin under `~/.paperclip/plugins/node_modules/@herrhelms/...` where the SDK is absent. Symptom: `ERR_MODULE_NOT_FOUND: Cannot find package '@paperclipai/plugin-sdk'` on first worker spawn after install from npm.

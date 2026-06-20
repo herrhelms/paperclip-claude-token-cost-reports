@@ -3,10 +3,10 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "claude-token-cost-reports",
   apiVersion: 1,
-  version: "1.0.1",
+  version: "1.0.2",
   displayName: "Claude Token Usage",
   description:
-    "Track Claude token usage per company, accumulate daily totals, and export a monthly CSV priced at configurable per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M context variants). The dashboard is mounted at the host's company-scoped plugin page (open from the company sidebar) and per-company pricing is configured here in the plugin settings.",
+    "Track Claude API token usage per Paperclip company and export a client-facing monthly invoice CSV in the currency you bill in. Per-company configuration covers per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M-context variants), margin %, and daily USD→target FX snapshots. Includes an optional subscription-mode toggle for operators on Pro or Max plans (approximate — divisors are pragmatic stand-ins, not Anthropic-published rates).",
   author: "@herrhelms",
   categories: ["automation"],
   capabilities: [

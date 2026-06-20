@@ -1,10 +1,8 @@
 # Claude Token Cost Reports
 
-> A Paperclip plugin that turns Anthropic's Claude tokens or flat-rate subscription consumption into a token-priced client invoice.
+> A Paperclip plugin that turns Claude API consumption into a token-priced client invoice.
 
-Track Claude token usage per Paperclip company, see who burned what across agents and models, and export a client-facing monthly invoice CSV in the currency you bill in. Daily FX snapshots, configurable margin, and a subscription divisor that reflects what the operator actually pays Anthropic.
-
-Designed for operators on a **Claude Pro** or **Claude Max** subscription who want to bill clients in a real currency without losing visibility on what API list price would have been.
+Tracks Claude token usage per Paperclip company, attributes it to agents and models, and exports a client-facing monthly invoice CSV in the currency you bill in. Daily FX snapshots, a configurable margin per company, and a subscription-mode toggle for operators billing through a flat-rate Anthropic plan.
 
 ---
 
@@ -16,7 +14,7 @@ paperclipai plugin install @herrhelms/claude-token-cost-reports
 
 # Verify the install
 paperclipai plugin list
-# expect: key=claude-token-cost-reports  status=ready  version=1.0.0  id=<uuid>
+# expect: key=claude-token-cost-reports  status=ready  version=1.0.2  id=<uuid>
 ```
 
 The host runs the plugin's database migrations automatically and registers the dashboard + settings page slots. No additional configuration is required to install — pricing and currency are set per-company in the Settings page after install.
@@ -33,9 +31,9 @@ The host runs the plugin's database migrations automatically and registers the d
 | Surface | Where to find it | What's there |
 | --- | --- | --- |
 | Dashboard | `/$COMPANY_HANDLE/monthly-report-claude` (in the company sidebar) | Usage KPIs, per-model bars, per-agent table, daily chart, monthly CSV export |
-| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Per-model pricing, margin, currency, subscription preset, FX-rate status |
+| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Per-model rates, margin, billing currency, FX-rate status, and an optional subscription-mode toggle |
 
-The `<install-uuid>` is shown by `paperclipai plugin list` after install.
+The `<install-uuid>` is printed by `paperclipai plugin list` after install.
 
 ---
 
@@ -43,14 +41,11 @@ The `<install-uuid>` is shown by `paperclipai plugin list` after install.
 
 After install, open the Settings page for any company:
 
-1. **Pick a billing currency** (10 supported). The hourly FX job will fetch today's USD→target rate and store one row per `(day, currency)`.
-2. **Set a margin %** — the percentage you add on top of cost when invoicing the client.
-3. **Choose a subscription preset:**
-   - **Off** — client pays for raw API consumption (no divisor).
-   - **Claude Pro (÷5)** — operator is on a Pro subscription; costs are divided by 5 before margin.
-   - **Claude Max (÷20)** — operator is on a Max subscription; costs are divided by 20 before margin.
-4. (Optional) **Adjust per-model rates.** Defaults are seeded from current Anthropic list prices for Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5 (including 1M-context variants).
-5. **Backfill historical events.** The Settings page has a `Backfill from history` button (for the current period) and `Backfill all history` (since the company's first cost event). The plugin reads directly from the host's `public.cost_events` table via the `coreReadTables` whitelist, so historical data from before the plugin install is available immediately.
+1. **Pick a billing currency** (10 supported). The hourly FX job fetches today's USD→target rate and stores one row per `(day, currency)`.
+2. **Set a margin %** — what you add on top of cost when invoicing the client.
+3. **(Optional) Adjust per-model rates.** Defaults are seeded from Anthropic list prices for Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5, including the 1M-context variants.
+4. **(Optional) Pick a subscription preset.** Most operators leave this at **Off** and bill against the raw API list price. If you're running off a Pro or Max subscription, read the [Subscription mode](#subscription-mode) section before turning it on — the divisors are approximations, not Anthropic rates.
+5. **Backfill historical events.** Use `Backfill from history` for the current period or `Backfill all history` to seed from the company's first event. The plugin reads `public.cost_events` directly via the `coreReadTables` whitelist, so pre-install usage is available immediately.
 
 Then open `/$COMPANY_HANDLE/monthly-report-claude` — the dashboard reflects the configuration within a second.
 
@@ -58,48 +53,27 @@ Then open `/$COMPANY_HANDLE/monthly-report-claude` — the dashboard reflects th
 
 ## What it does
 
-- Subscribes to `cost_event.created` and `agent.run.finished` and writes one row per event into a private `usage_events` table. Keys are `cost_event:<id>` for cost events so the live subscription and `Backfill from history` action share a keyspace and dedupe idempotently.
-- Rolls up to `usage_daily` every 15 minutes per company.
-- Fetches a daily USD→target FX rate from `open.er-api.com` and stores one row per `(day, currency)` in `fx_rates`. Only fetches for currencies at least one company has configured.
-- Cleans up automatically when a company is archived (purges `usage_events`, `usage_daily`, `pricing_config`, currency state).
+- Subscribes to `cost_event.created` and writes one row per event into a private `usage_events` table, keyed by `cost_event:<id>` so live ingestion and the backfill action share a keyspace and dedupe idempotently. Filters to `provider IN ('anthropic', 'claude')` so it cohabits cleanly with sibling plugins for other providers.
+- Rolls up `usage_daily` every 15 minutes per company. The rollup is a single UPSERT, so concurrent live + cron writes can't race to lose tokens.
+- Fetches a daily USD→target FX rate from `open.er-api.com`, bounded to a sanity envelope; outliers are logged and skipped rather than persisted to the invoice trail.
+- Cleans up when a company is archived: purges usage tables, currency state, and pricing state.
 
 ### Dashboard at `/$COMPANY/monthly-report-claude`
 
-- 6 KPI cards: total tokens, input, output, list (pre-margin), net (subscription-adjusted), price (chargeback). Labels switch to **List** + **Sub-adjusted** when a subscription preset is active.
-- Per-model horizontal bar chart with native-currency cost and price.
-- Per-agent table with totals + per-model breakdown (Runs / Input / Output / Cost / Price columns).
+- 6 KPI cards: total tokens, input, output, list (pre-margin), net (subscription-adjusted), price (chargeback). The List + Net labels surface only when a subscription preset is active.
+- Per-model horizontal bar chart, native-currency cost and price.
+- Per-agent table with totals + per-model breakdown (Runs / Input / Output / Cost / Price).
 - Daily volume column chart — input + output stacked, peak label.
-- Status chips for ingest health and FX staleness next to the title.
+- Status chips for ingest health and FX staleness next to the page title.
 
 ### Settings at `/$COMPANY/company/settings/instance/plugins/<install-uuid>`
 
-- Per-model rates (USD per 1M input / output) for Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus the 1M-context variants.
+- Per-model rates (USD per 1M input / output) for Opus 4.8 / 4.7 and Sonnet 4.6 / 4.5, plus the 1M-context variants.
 - Margin %.
 - Billing currency (10 currencies), with **Refresh FX now** and a status line showing the active rate.
-- Subscription preset (Off / Claude Pro ÷5 / Claude Max ÷20).
+- Optional subscription preset, with a visible caveat about what the divisors actually mean — see [Subscription mode](#subscription-mode).
 
 The dashboard inherits the host's Paperclip theme (light/dark, shadcn-style cards) by referencing host CSS variables directly.
-
----
-
-## Subscription mode
-
-The plugin computes two cost lanes per row:
-
-- **List** = `tokens × per-MTok rate` — what API billing would charge.
-- **Sub-adjusted** = `List ÷ divisor × (1 + margin)` — what the operator bills the client.
-
-The divisor comes from the Subscription preset in Settings:
-
-| Preset | Divisor | Use when |
-| --- | --- | --- |
-| Off | 1 | Client pays for raw API consumption |
-| Claude Pro | 5 | Operator covers usage with a Pro subscription |
-| Claude Max | 20 | Operator covers usage with a Max subscription |
-
-Switching modes never rewrites historical data — it's a render-time recompute. The dashboard's KPI labels and the per-agent table column headers update in place. The monthly CSV applies the divisor at row aggregation time so the exported invoice matches the dashboard total to the cent.
-
-> **Grain of salt on the ÷5 / ÷20 divisors.** Anthropic does not publish a per-token cost for Claude Pro or Claude Max subscriptions — what a subscription user actually "pays per token" is opaque, varies with monthly usage, and is not a straight discount on the API list price. The 5× and 20× constants here are pragmatic stand-ins, not a recovered Anthropic price formula. They're set so that an operator on a Pro or Max plan can fold a subscription account into the same billable model the rest of the system runs on — list price → divisor → margin → currency — and get a number that's defensible to a client without pretending it's an Anthropic-issued rate. If you have a contract or workload where the implicit per-token cost differs materially from list ÷ divisor, override the per-model rates in Settings and leave the preset at **Off**.
 
 ---
 
@@ -109,14 +83,33 @@ For each event with model `m`, input tokens `i`, output tokens `o`:
 
 ```text
 list_cost     = (i × pricing[m].input + o × pricing[m].output) / 1_000_000     # USD
-operator_cost = list_cost / subscriptionDivisor                                 # Pro÷5, Max÷20, Off÷1
-client_price  = operator_cost × (1 + margin.percent / 100)                      # USD
+client_price  = list_cost × (1 + margin.percent / 100)                          # USD
 row.price     = client_price × fx_rate(month_end_day, currency)                 # Native currency
 ```
 
-The dashboard KPI **Cost** shows `list_cost` summed in native currency (what an API user would pay at list price). KPI **Price** shows `row.price` summed (what the client owes after margin and currency conversion). The per-model and per-agent cards show both side by side, so reconciliation is explicit.
+When subscription mode is active, `list_cost` is divided by the preset's divisor (5 for Pro, 20 for Max) before margin is applied. See the next section for the reasoning and a hard caveat.
+
+KPI **Cost** on the dashboard is `list_cost` in the billing currency (what an API user would pay at list price). KPI **Price** is `row.price` (what the client owes after margin and currency conversion). The per-model and per-agent cards show both side by side, so reconciliation is explicit.
 
 The monthly CSV emits only `row.price` — operator-internal numbers (list cost, divisor, margin %) stay off the file you send to the client.
+
+---
+
+## Subscription mode
+
+> ⚠️ **The ÷5 / ÷20 divisors are an approximation, not an Anthropic rate.**
+>
+> Anthropic does not publish a per-token cost for Pro or Max subscriptions. What a subscription user effectively pays per token varies with monthly usage and is not a straight discount on the API list price. The constants here are pragmatic stand-ins so that an operator on a flat-rate plan can fold a subscription account into the same billing pipeline the rest of the system runs on — list price → divisor → margin → currency → invoice. They are NOT a recovered Anthropic price formula.
+
+Use this mode if you need a defensible chargeback number for a client and you don't want to invent one. If your contract or workload diverges materially from `list ÷ divisor`, override the per-model rates in Settings and leave the preset at **Off** — that path stays honest by construction.
+
+| Preset | Divisor | Use when |
+| --- | --- | --- |
+| Off | 1 | Client pays for raw API consumption (default; most accurate) |
+| Claude Pro | 5 | Operator covers usage with a Pro subscription |
+| Claude Max | 20 | Operator covers usage with a Max subscription |
+
+Switching modes never rewrites historical data — it's a render-time recompute. KPI labels and per-agent column headers update in place. The monthly CSV applies the divisor at row aggregation so the exported invoice matches the dashboard total to the cent.
 
 ---
 
@@ -126,7 +119,7 @@ The monthly CSV emits only `row.price` — operator-internal numbers (list cost,
 GET /api/plugins/claude-token-cost-reports/api/export/monthly.csv?companyId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
-Columns: `period, month_start, month_end, model, input_tokens, output_tokens, total_tokens, currency, price`.
+Columns: `period, month_start, month_end, model, input_tokens, output_tokens, total_tokens, currency, price`. Cells are RFC 4180-escaped; `from` / `to` are validated as strict `YYYY-MM-DD`.
 
 Multi-month exports include a `model = TOTAL` row at the end of each month section. Filename: `usage-<company-slug>-<from>-<to>-<currency>.csv`.
 
@@ -165,7 +158,7 @@ Private SQL namespace via `ctx.db` (`plugin_claude_token_cost_reports_c7ca204bbe
 
 Migrations: `migrations/001_init.sql`, `migrations/002_costs_overview.sql`, `migrations/003_fx_rates.sql`.
 
-Core-read tables (declared in manifest): `cost_events` — used by the backfill action to import history from before the plugin install.
+Core-read tables (declared in manifest): `cost_events` — used by the backfill action to import history from before the plugin install. Filtered to `provider IN ('anthropic', 'claude')`.
 
 ### Plugin state keys
 
@@ -226,10 +219,13 @@ For developers and forks. Standalone plugin package; built against `@paperclipai
 ```bash
 pnpm install
 pnpm typecheck       # base + tests/ (chained via tsconfig.test.json)
-pnpm test            # 33 unit tests on the pure math + manifest
+pnpm test            # 53 unit tests on pure math, validators, and manifest
 pnpm build           # emits dist/manifest.js, dist/worker.js, dist/ui/index.js
+```
 
-# Install the locally built copy into the Paperclip host on this machine:
+Install the locally built copy into the Paperclip host on this machine:
+
+```bash
 paperclipai plugin install -l .
 paperclipai plugin list
 ```

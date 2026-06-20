@@ -2353,6 +2353,34 @@ export function SettingsPage(): JSX.Element {
             ))}
           </select>
         </div>
+
+        {/* Grain-of-salt callout — surfaces the same caveat as the README's
+            Subscription-mode section, right where the operator is choosing
+            the preset. Visually distinct from muted body text. */}
+        <div
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            borderLeft: "3px solid #d97706",
+            background: "rgba(217, 119, 6, 0.08)",
+            fontSize: 12,
+            color: "var(--tu-fg)",
+            maxWidth: 640,
+            lineHeight: 1.5,
+            borderRadius: 4,
+          }}
+        >
+          <strong>The ÷5 / ÷20 divisors are an approximation, not an
+          Anthropic rate.</strong> Anthropic does not publish per-token costs
+          for Pro or Max subscriptions; what a subscription user effectively
+          pays per token varies with monthly usage. These divisors are
+          pragmatic stand-ins so a flat-rate account can flow through the same
+          billing pipeline as raw API usage — they are NOT a recovered
+          Anthropic price formula. If your contract or workload diverges
+          materially from <code>list ÷ divisor</code>, override the per-model
+          rates above and leave this preset at <strong>Off</strong>.
+        </div>
+
         <p
           style={{
             marginTop: 8,
@@ -2361,14 +2389,12 @@ export function SettingsPage(): JSX.Element {
             maxWidth: 640,
           }}
         >
-          When a subscription preset is active, the chargeback column on the
-          usage dashboard is divided by the preset's multiplier before margin
-          is applied. The list-price column is unchanged, so you can see the
-          subscription savings at a glance.
+          When active, the chargeback column on the dashboard is divided by
+          the preset's multiplier before margin is applied. The list-price
+          column stays unchanged so you can see the gap.
           <br />
           Example: $100 tokens · Pro (÷5) · 10% margin → cost $20 → price{" "}
-          <strong>$22</strong>. With margin in EUR at 0.80, that's{" "}
-          <strong>€17.60</strong>.
+          <strong>$22</strong>. At 0.80 EUR/USD, that's <strong>€17.60</strong>.
         </p>
       </div>
 
