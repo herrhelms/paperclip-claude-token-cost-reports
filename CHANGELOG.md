@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-06-20
+### Changed
+- BREAKING: npm package renamed `claude-token-cost-reports` → `@herrhelms/claude-token-cost-reports` so installs match the user's npm scope. The in-app plugin key (`id` in manifest) and DB namespace stay as `claude-token-cost-reports` / `plugin_claude_token_cost_reports_c7ca204bbe` — only the npm name changed.
+- BREAKING: dashboard `routePath` renamed `tokens` → `monthly-report-claude`. Dashboard URL becomes `/$COMPANY/monthly-report-claude`. The previous `/$COMPANY/tokens` no longer resolves.
+- Internal `docs/` folder is no longer tracked in git (gitignored). README.md + CHANGELOG.md remain the consumer-facing docs.
+
 ## [1.0.0-rc.3] - 2026-06-18
 ### Changed
 - README rewritten as a consumer-focused install guide: install command up top, Quick start walkthrough for first-time Settings configuration, reordered structure (Install → Quick start → What it does → Subscription mode → Billing → Reference → Build from source).

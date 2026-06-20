@@ -16,12 +16,12 @@ import {
 // Usage page: the `page` slot's `routePath` is mounted by the host directly
 // under the company prefix as `/:companyPrefix/<routePath>` — NOT under
 // `/plugins/<pluginKey>/...`. The host validator requires routePath to be a
-// single lowercase slug (letters/numbers/hyphens). With routePath:"tokens"
-// the canonical page URL is /$COMPANY_HANDLE/tokens. linkProps() takes a
+// single lowercase slug (letters/numbers/hyphens). With routePath:"monthly-report-claude"
+// the canonical page URL is /$COMPANY_HANDLE/monthly-report-claude. linkProps() takes a
 // company-relative path (leading slash, no company prefix) and the host
 // resolves the prefix at render time.
 const PLUGIN_KEY = "claude-token-cost-reports";
-const USAGE_ROUTE_SLUG = "tokens";
+const USAGE_ROUTE_SLUG = "monthly-report-claude";
 // Host router (confirmed against the installed bundle):
 //   path:"company/settings/instance/plugins/:pluginId"
 // — and :pluginId is the install UUID, NOT the plugin key. The UUID isn't

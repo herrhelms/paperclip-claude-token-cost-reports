@@ -3,7 +3,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 const manifest: PaperclipPluginManifestV1 = {
   id: "claude-token-cost-reports",
   apiVersion: 1,
-  version: "1.0.0-rc.3",
+  version: "1.0.0-rc.4",
   displayName: "Claude Token Usage",
   description:
     "Track Claude token usage per company, accumulate daily totals, and export a monthly CSV priced at configurable per-model rates (Opus 4.8 / 4.7, Sonnet 4.6 / 4.5, plus 1M context variants). The dashboard is mounted at the host's company-scoped plugin page (open from the company sidebar) and per-company pricing is configured here in the plugin settings.",
@@ -90,9 +90,9 @@ const manifest: PaperclipPluginManifestV1 = {
         // Host validation: routePath must be a single lowercase slug — letters,
         // numbers, hyphens; no slashes. The host mounts this at the company-scoped
         // path it owns; we don't get to insert intermediate path segments.
-        // "tokens" reads cleaner than "usage" since the host's prefix already
-        // contains the plugin key: /$COMPANY/plugins/claude-token-cost-reports/tokens.
-        routePath: "tokens",
+        // "monthly-report-claude" reads naturally in the address bar:
+        // /$COMPANY/monthly-report-claude is the page title and the URL.
+        routePath: "monthly-report-claude",
       },
       {
         type: "settingsPage",
