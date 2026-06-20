@@ -90,6 +90,14 @@ async function fetchCompanySlug(companyId: string): Promise<string | null> {
   }
 }
 
+// Build a Settings deeplink that pre-fills the Add Rate form with `modelKey`.
+// Settings honors the `#add-<encoded-key>` hash on mount (see SettingsPage's
+// hash-effect) by scrolling the `data-add-rate` form into view and focusing
+// its key field. The base href is whatever useSettingsHref() returns.
+function settingsUrlForAddRate(modelKey: string, settingsHref: string): string {
+  return `${settingsHref}#add-${encodeURIComponent(modelKey)}`;
+}
+
 function useSettingsHref(): string {
   const [href, setHref] = useState<string>(
     cachedInstallId
@@ -569,6 +577,28 @@ const styles = {
     fontSize: 12,
     color: "var(--muted-foreground)",
   } as React.CSSProperties,
+
+  // "No rate set" affordance — surfaced on per-model bars and per-agent
+  // sub-rows whenever a usage row has no matching rate row in the active
+  // pricing snapshot (cost_usd === null). The amber chip is visually
+  // distinct from priced cells; the inline "add rate →" link drops the
+  // operator on Settings with the model id pre-filled.
+  noRateChip: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "2px 8px",
+    borderLeft: "3px solid #d97706",
+    background: "rgba(217, 119, 6, 0.08)",
+    borderRadius: 4,
+    fontSize: 12,
+    color: "var(--foreground)",
+  } as React.CSSProperties,
+  noRateLink: {
+    color: "#d97706",
+    textDecoration: "underline",
+    cursor: "pointer",
+  } as React.CSSProperties,
 };
 
 function ThemeStyles(): JSX.Element {
@@ -987,6 +1017,7 @@ function PerModelCard(props: {
   currency: CurrencyCode;
   pricingConfig: PricingConfig | null;
   settingsLinkProps: SettingsLinkProps;
+  settingsHref: string;
 }) {
   if (props.loading) {
     return (
@@ -1047,12 +1078,28 @@ function PerModelCard(props: {
               </div>
               <div style={styles.modelNums}>
                 {fmtTokens(r.total_tokens)} tok
-                {props.priced && r.price_native !== null
-                  ? ` · ${fmtMoney(r.cost_native, props.currency)} → ${fmtMoney(
-                      r.price_native,
-                      props.currency,
-                    )}`
-                  : ""}
+                {props.priced && r.cost_usd === null ? (
+                  <>
+                    {" · "}
+                    <span style={styles.noRateChip}>
+                      no rate set
+                      <a
+                        {...props.settingsLinkProps}
+                        href={settingsUrlForAddRate(r.model, props.settingsHref)}
+                        style={styles.noRateLink}
+                      >
+                        add rate →
+                      </a>
+                    </span>
+                  </>
+                ) : props.priced && r.price_native !== null ? (
+                  ` · ${fmtMoney(r.cost_native, props.currency)} → ${fmtMoney(
+                    r.price_native,
+                    props.currency,
+                  )}`
+                ) : (
+                  ""
+                )}
               </div>
             </div>
           );
@@ -1075,6 +1122,7 @@ function PerAgentCard(props: {
   data: PerAgentResponse | null;
   pricingConfig: PricingConfig | null;
   settingsLinkProps: SettingsLinkProps;
+  settingsHref: string;
 }) {
   if (props.loading) {
     return (
@@ -1210,12 +1258,30 @@ function PerAgentCard(props: {
                     <td style={subRowCell}>{fmtTokens(m.output_tokens)}</td>
                     {priced && (
                       <td style={subRowCell}>
-                        {fmtMoney(m.cost_native, currency)}
+                        {m.cost_usd === null ? (
+                          <span style={styles.noRateChip}>
+                            no rate set
+                            <a
+                              {...props.settingsLinkProps}
+                              href={settingsUrlForAddRate(
+                                m.model,
+                                props.settingsHref,
+                              )}
+                              style={styles.noRateLink}
+                            >
+                              add rate →
+                            </a>
+                          </span>
+                        ) : (
+                          fmtMoney(m.cost_native, currency)
+                        )}
                       </td>
                     )}
                     {priced && (
                       <td style={subRowCell}>
-                        {fmtMoney(m.price_native, currency)}
+                        {m.cost_usd === null
+                          ? "—"
+                          : fmtMoney(m.price_native, currency)}
                       </td>
                     )}
                   </tr>
@@ -1926,6 +1992,7 @@ export function UsagePage(): JSX.Element {
         currency={currency}
         pricingConfig={pricingConfig}
         settingsLinkProps={settingsLinkProps}
+        settingsHref={settingsHref}
       />
 
       {/* By agent */}
@@ -1934,6 +2001,7 @@ export function UsagePage(): JSX.Element {
         data={perAgent.data ?? null}
         pricingConfig={pricingConfig}
         settingsLinkProps={settingsLinkProps}
+        settingsHref={settingsHref}
       />
 
       {/* Daily chart */}
@@ -2090,6 +2158,34 @@ export function SettingsPage(): JSX.Element {
     const normalized = normalizePricing(pricing.data);
     if (normalized) setConfig(normalized);
   }, [pricing.data]);
+
+  // Honor #add-<model-key> deeplink from the dashboard's "no rate set" chip.
+  // Runs once on mount: scrolls the Add Rate form into view and pre-fills
+  // the key input so the operator can finish in two keystrokes (input rate,
+  // output rate). The form selector matches the data-add-rate attribute
+  // added in T8. Deferred a tick so the form is mounted before we scroll.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash;
+    const m = hash.match(/^#add-(.+)$/);
+    if (!m) return;
+    const key = decodeURIComponent(m[1]);
+    const tid = window.setTimeout(() => {
+      const form = document.querySelector<HTMLFormElement>(
+        "form[data-add-rate]",
+      );
+      if (!form) return;
+      form.scrollIntoView({ behavior: "smooth", block: "center" });
+      const keyInput = form.querySelector<HTMLInputElement>(
+        'input[name="key"]',
+      );
+      if (keyInput) {
+        keyInput.value = key;
+        keyInput.focus();
+      }
+    }, 50);
+    return () => window.clearTimeout(tid);
+  }, []);
 
   const save = async () => {
     setSaving(true);
