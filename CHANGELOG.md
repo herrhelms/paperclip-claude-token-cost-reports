@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-06-20
+### Added
+- `renormalizeStaleModels` action that walks `usage_events`, re-runs `normalizeModel(raw_model)` for every row, updates `model` in-place where the result differs from the stored value, and re-rolls every affected `(company, day)`. Closes the gap exposed by 1.0.4: extending the priced table doesn't retroactively re-classify rows that were ingested under the old normalizer and stored as `model='unknown'`. Idempotent — re-running is a no-op once the data converges. Optional `companyId` parameter scopes the sweep; omitting it walks every company on the host.
+
+### Why
+- 1.0.4 added Opus 4.6 / 4.6-1m / 4.5 / Haiku 4.5 to `DEFAULT_PRICING`, but a reinstall on a host with existing April data still showed `unknown` because the stored `model` column was already stamped. This action is the migration path.
+
+### How to use
+```bash
+paperclipai plugin bridge:action claude-token-cost-reports \
+  --payload-json '{"key":"renormalizeStaleModels","params":{}}' --json
+# scope to one company:
+paperclipai plugin bridge:action claude-token-cost-reports \
+  --payload-json '{"key":"renormalizeStaleModels","params":{"companyId":"<uuid>"}}' --json
+```
+
 ## [1.0.4] - 2026-06-20
 ### Added
 - 5 new rows in the priced model table to cover model identifiers the host emits but the 8-row table missed: `opus-4-6`, `opus-4-6-1m`, `opus-4-5`, `haiku-4-5`. The standout — `opus-4-6` / `opus-4-6-1m` at $5 / $25 per MTok — is why historical April periods with Claude Opus 4.6 events showed up as `unknown` model and €0.00 cost. Rates fetched from platform.claude.com/docs/en/about-claude/pricing on 2026-06-20. Per the page's "Long context pricing" section, Opus 4.6 / 4.7 / 4.8 and Sonnet 4.6 include the full 1M-context window at standard pricing, so each `-1m` row matches the standard rate.

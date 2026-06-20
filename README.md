@@ -14,7 +14,7 @@ paperclipai plugin install @herrhelms/claude-token-cost-reports
 
 # Verify the install
 paperclipai plugin list
-# expect: key=claude-token-cost-reports  status=ready  version=1.0.4  id=<uuid>
+# expect: key=claude-token-cost-reports  status=ready  version=1.0.5  id=<uuid>
 ```
 
 The host runs the plugin's database migrations automatically and registers the dashboard + settings page slots. No additional configuration is required to install — pricing and currency are set per-company in the Settings page after install.

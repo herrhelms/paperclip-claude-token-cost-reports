@@ -2166,6 +2166,65 @@ const plugin = definePlugin({
       const result = await runBackfill(ctx, companyId, from, to);
       return { ...result, from, to };
     });
+
+    // Re-normalize stored `usage_events.model` values against the current
+    // normalizeModel implementation. Useful after a plugin update widens
+    // the priced model table — previously-ingested rows are sitting in the
+    // database with `model='unknown'`, but their `raw_model` is preserved
+    // so we can compute the correct key and update in place. Re-rolls every
+    // (company, day) pair that had at least one row change. Idempotent.
+    ctx.actions.register("renormalizeStaleModels", async (params) => {
+      const companyFilter = String(params.companyId ?? "");
+      const where = companyFilter
+        ? "WHERE raw_model IS NOT NULL AND company_id = $1"
+        : "WHERE raw_model IS NOT NULL";
+      const args = companyFilter ? [companyFilter] : [];
+      const rows = await ctx.db.query<{
+        source_event_id: string;
+        company_id: string;
+        day: string;
+        model: string;
+        raw_model: string;
+      }>(
+        `SELECT source_event_id, company_id, day, model, raw_model
+           FROM ${q(ctx, "usage_events")}
+           ${where}`,
+        args,
+      );
+
+      let updated = 0;
+      const affected = new Set<string>();
+      for (const r of rows) {
+        const next = normalizeModel(r.raw_model);
+        if (next !== r.model) {
+          await ctx.db.execute(
+            `UPDATE ${q(ctx, "usage_events")}
+                SET model = $1
+              WHERE source_event_id = $2`,
+            [next, r.source_event_id],
+          );
+          updated++;
+          affected.add(`${r.company_id}|${r.day}`);
+        }
+      }
+
+      for (const key of affected) {
+        const [companyId, day] = key.split("|");
+        await rollupCompanyDay(ctx, companyId, day);
+      }
+
+      ctx.logger.info("renormalizeStaleModels done", {
+        scanned: rows.length,
+        updated,
+        daysRolledUp: affected.size,
+        companyFilter: companyFilter || null,
+      });
+      return {
+        scanned: rows.length,
+        updated,
+        daysRolledUp: affected.size,
+      };
+    });
   },
 
   async onApiRequest(input: PluginApiRequestInput): Promise<PluginApiResponse> {
