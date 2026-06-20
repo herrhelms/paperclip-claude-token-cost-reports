@@ -8,6 +8,16 @@ import type {
   PluginContext,
   PluginEvent,
 } from "@paperclipai/plugin-sdk";
+import type { PricingConfig as NewPricingConfig, PricingSnapshot } from "./pricing";
+import {
+  isValidPricingConfig,
+  findActiveSnapshot,
+  lookupRate as _lookupRate,
+  DEFAULT_SEED_PRICING,
+} from "./pricing";
+// Re-export so Task 4's cost-computation rewire can import it from worker.ts.
+// Also keeps tsc's noUnusedLocals quiet until then.
+export const lookupRate = _lookupRate;
 
 // Model keys are stable identifiers stored in usage_events.model / usage_daily.model.
 // Format: `<family>-<major>-<minor>[-1m]`. The `-1m` suffix marks the 1M-token-context variant.
@@ -203,6 +213,70 @@ function pricingScope(companyId: string) {
     scopeId: companyId,
     stateKey: "pricing-config",
   };
+}
+
+// Snapshot storage helpers. The 1.x single-doc ctx.state config is gone;
+// authoritative pricing lives in pricing_config_history (one row per save).
+// Reads are DESC by effective_from so findActiveSnapshot's linear scan is
+// O(1) in the common N=1 case.
+async function loadAllSnapshots(
+  ctx: PluginContext,
+  companyId: string,
+): Promise<PricingSnapshot[]> {
+  const rows = await ctx.db.query<{
+    effective_from: string;
+    config_json: NewPricingConfig;
+    created_at: string;
+    created_by: string | null;
+    note: string | null;
+  }>(
+    `SELECT effective_from::text AS effective_from,
+            config_json,
+            created_at::text AS created_at,
+            created_by,
+            note
+       FROM ${q(ctx, "pricing_config_history")}
+      WHERE company_id = $1
+      ORDER BY effective_from DESC`,
+    [companyId],
+  );
+  return rows.map((r) => ({
+    effective_from: r.effective_from,
+    config: r.config_json,
+    created_at: r.created_at,
+    created_by: r.created_by,
+    note: r.note,
+  }));
+}
+
+async function insertSnapshot(
+  ctx: PluginContext,
+  companyId: string,
+  effectiveFrom: string,
+  config: NewPricingConfig,
+  note: string | null,
+): Promise<void> {
+  await ctx.db.execute(
+    `INSERT INTO ${q(ctx, "pricing_config_history")}
+       (company_id, effective_from, config_json, note)
+     VALUES ($1, $2::timestamptz, $3::jsonb, $4)
+     ON CONFLICT (company_id, effective_from) DO UPDATE
+       SET config_json = EXCLUDED.config_json,
+           note = EXCLUDED.note`,
+    [companyId, effectiveFrom, JSON.stringify(config), note],
+  );
+}
+
+// Exported so Task 4's per-event cost-computation handler can resolve the
+// active pricing for a given occurred_at timestamp.
+export async function loadActiveConfig(
+  ctx: PluginContext,
+  companyId: string,
+  occurredAt: string,
+): Promise<NewPricingConfig | null> {
+  const snapshots = await loadAllSnapshots(ctx, companyId);
+  const snap = findActiveSnapshot(snapshots, occurredAt);
+  return snap?.config ?? null;
 }
 
 export function isPricingConfig(v: unknown): v is PricingConfig {
@@ -1824,21 +1898,92 @@ const plugin = definePlugin({
     ctx.data.register("getPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
-      const existing = await loadPricing(ctx, companyId);
-      // Return the bare PricingConfig — never wrap; UI binds to .pricing/.margin directly.
-      return existing ?? DEFAULT_PRICING;
+      const snapshots = await loadAllSnapshots(ctx, companyId);
+      // Active = the snapshot with the largest effective_from. Falls back
+      // to DEFAULT_SEED_PRICING when there are no snapshots yet (fresh
+      // install before the auto-migration has run, or a company that was
+      // never configured). The UI shows this as editable.
+      if (snapshots.length === 0) {
+        return { pricing: DEFAULT_SEED_PRICING, hasSnapshot: false };
+      }
+      return { pricing: snapshots[0].config, hasSnapshot: true };
     });
 
+    // Returns the full chronological list of snapshots for a company.
+    // Used by the Settings page History panel. Ordered DESC by
+    // effective_from so the most recent is first.
+    ctx.data.register("listPricingHistory", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const snapshots = await loadAllSnapshots(ctx, companyId);
+      return { snapshots };
+    });
+
+    // setPricing keeps its 1.x signature: { companyId, config }. Internally
+    // it appends a snapshot with effective_from = now() so historical rows
+    // are preserved. Operators can still call addPricingSnapshot directly
+    // to backdate a snapshot.
     ctx.actions.register("setPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
-      const config = params.config as PricingConfig | undefined;
-      if (!companyId || !config) throw new Error("companyId and config are required");
-      if (!isPricingConfig(config)) {
+      if (!companyId) throw new Error("companyId is required");
+      const config = params.config as unknown;
+      if (!isValidPricingConfig(config)) {
         throw new Error("config does not match the PricingConfig shape");
       }
-      await ctx.state.set(pricingScope(companyId), config);
-      ctx.logger.info("pricing saved", { companyId });
-      return { ok: true };
+      const now = new Date().toISOString();
+      await insertSnapshot(ctx, companyId, now, config, "via setPricing");
+      ctx.logger.info("pricing snapshot appended", { companyId, effective_from: now });
+      return { ok: true, effective_from: now };
+    });
+
+    // Explicit snapshot append with operator-chosen effective_from + note.
+    // Useful when migrating prior pricing manually or backdating a change.
+    ctx.actions.register("addPricingSnapshot", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const effectiveFrom = String(params.effective_from ?? "");
+      if (!effectiveFrom) throw new Error("effective_from is required");
+      if (Number.isNaN(Date.parse(effectiveFrom))) {
+        throw new Error("effective_from must be an ISO 8601 UTC timestamp");
+      }
+      const config = params.config as unknown;
+      if (!isValidPricingConfig(config)) {
+        throw new Error("config does not match the PricingConfig shape");
+      }
+      const note = params.note ? String(params.note) : null;
+      await insertSnapshot(ctx, companyId, effectiveFrom, config, note);
+      ctx.logger.info("pricing snapshot appended", { companyId, effective_from: effectiveFrom, note });
+      return { ok: true, effective_from: effectiveFrom };
+    });
+
+    // Append a NEW snapshot whose config is a copy of an existing one.
+    // The operator picks a historical effective_from, and a new snapshot
+    // with effective_from=now() and the same config is created.
+    ctx.actions.register("revertToPricingSnapshot", async (params) => {
+      const companyId = String(params.companyId ?? "");
+      if (!companyId) throw new Error("companyId is required");
+      const sourceFrom = String(params.source_effective_from ?? "");
+      if (!sourceFrom) throw new Error("source_effective_from is required");
+      const [src] = await ctx.db.query<{ config_json: NewPricingConfig }>(
+        `SELECT config_json FROM ${q(ctx, "pricing_config_history")}
+          WHERE company_id = $1 AND effective_from = $2::timestamptz`,
+        [companyId, sourceFrom],
+      );
+      if (!src) throw new Error(`no snapshot found at effective_from=${sourceFrom}`);
+      const now = new Date().toISOString();
+      await insertSnapshot(
+        ctx,
+        companyId,
+        now,
+        src.config_json,
+        `revert to ${sourceFrom}`,
+      );
+      ctx.logger.info("pricing snapshot reverted", {
+        companyId,
+        source_effective_from: sourceFrom,
+        new_effective_from: now,
+      });
+      return { ok: true, effective_from: now, source_effective_from: sourceFrom };
     });
 
     // ---- Currency + FX ---------------------------------------------------
