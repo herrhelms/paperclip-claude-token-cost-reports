@@ -215,6 +215,14 @@ function pricingScope(companyId: string) {
   };
 }
 
+function migrationScope() {
+  return {
+    scopeKind: "instance" as const,
+    scopeId: "_global",
+    stateKey: "migration_2_0_0_done",
+  };
+}
+
 // Snapshot storage helpers. The 1.x single-doc ctx.state config is gone;
 // authoritative pricing lives in pricing_config_history (one row per save).
 // Reads are DESC by effective_from so findActiveSnapshot's linear scan is
@@ -277,6 +285,87 @@ export async function loadActiveConfig(
   const snapshots = await loadAllSnapshots(ctx, companyId);
   const snap = findActiveSnapshot(snapshots, occurredAt);
   return snap?.config ?? null;
+}
+
+async function runMigration2_0_0(ctx: PluginContext): Promise<void> {
+  const marker = await ctx.state.get(migrationScope());
+  if (marker === true) return;
+
+  ctx.logger.info("migration 2.0.0 starting");
+
+  // Step 1: walk every company that has any pricing-config in ctx.state.
+  // The state API doesn't expose a list-all; we infer company_id list from
+  // existing usage_events.
+  const companies = await ctx.db.query<{ company_id: string }>(
+    `SELECT DISTINCT company_id FROM ${q(ctx, "usage_events")}`,
+  );
+  let migratedConfigs = 0;
+  for (const { company_id } of companies) {
+    const existing = await ctx.state.get(pricingScope(company_id));
+    if (existing && typeof existing === "object") {
+      // The 1.x shape has fixed ModelKey rows. Translate to free-form keys
+      // by using the keys verbatim — 1.x keys (opus-4-7-1m etc.) are valid
+      // free-form keys in 2.0.0.
+      const e = existing as Record<string, unknown>;
+      const legacyPricing = (e.pricing ?? {}) as Record<string, { input: number; output: number }>;
+      const legacyMargin = ((e.margin as { percent?: number } | undefined)?.percent) ?? 0;
+      const legacySub = e.subscription as { divisor?: number } | undefined;
+      const legacyDivisor = legacySub?.divisor;
+      const config = {
+        pricing: legacyPricing,
+        margin: { percent: legacyMargin },
+        effective_input_rate_multiplier:
+          legacyDivisor && legacyDivisor > 0 ? 1 / legacyDivisor : 1,
+      };
+      if (isValidPricingConfig(config)) {
+        await insertSnapshot(
+          ctx,
+          company_id,
+          "1970-01-01T00:00:00Z",
+          config,
+          "auto-migrated from 1.x ctx.state",
+        );
+        migratedConfigs++;
+      }
+    }
+  }
+
+  ctx.logger.info("migration 2.0.0 ctx.state -> history done", { migratedConfigs });
+
+  // Step 2: final cleanup sweep. Any usage_events row with model='unknown'
+  // and a non-'unknown' raw_model gets model = raw_model. 2.0.0 doesn't
+  // normalize — pricing lookup is exact match against the operator's table.
+  let resweptRows = 0;
+  const sweepRows = await ctx.db.query<{
+    source_event_id: string;
+    company_id: string;
+    day: string;
+    raw_model: string | null;
+  }>(
+    `SELECT source_event_id, company_id, day, raw_model
+       FROM ${q(ctx, "usage_events")}
+      WHERE model = 'unknown' AND raw_model IS NOT NULL`,
+  );
+  const affectedDays = new Set<string>();
+  for (const r of sweepRows) {
+    if (!r.raw_model) continue;
+    if (r.raw_model !== "unknown") {
+      await ctx.db.execute(
+        `UPDATE ${q(ctx, "usage_events")} SET model = $1 WHERE source_event_id = $2`,
+        [r.raw_model, r.source_event_id],
+      );
+      resweptRows++;
+      affectedDays.add(`${r.company_id}|${r.day}`);
+    }
+  }
+  for (const key of affectedDays) {
+    const [companyId, day] = key.split("|");
+    await rollupCompanyDay(ctx, companyId, day);
+  }
+  ctx.logger.info("migration 2.0.0 sweep done", { resweptRows, daysRolledUp: affectedDays.size });
+
+  await ctx.state.set(migrationScope(), true);
+  ctx.logger.info("migration 2.0.0 complete");
 }
 
 export function isPricingConfig(v: unknown): v is PricingConfig {
@@ -2602,6 +2691,16 @@ const plugin = definePlugin({
         })),
       };
     });
+
+    // Run the 2.0.0 auto-migration once per host. Idempotent — gated on
+    // an instance-scoped marker in ctx.state.
+    try {
+      await runMigration2_0_0(ctx);
+    } catch (err) {
+      ctx.logger.warn("migration 2.0.0 failed; will retry on next worker restart", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 
   async onApiRequest(input: PluginApiRequestInput): Promise<PluginApiResponse> {
