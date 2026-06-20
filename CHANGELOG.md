@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] - 2026-06-20
+### Changed
+- npm package name set to `@herrhelms/claude-token-cost-reports` ahead of first publish to the npm registry. In-app plugin key (`claude-token-cost-reports`) and DB namespace unchanged.
+
+### Fixed
+- BLOCKER: ingest + backfill now filter to `provider IN ('anthropic', 'claude')` so the plugin no longer slurps OpenAI events when installed alongside `@herrhelms/openai-token-cost-reports`.
+- BLOCKER: `rollupCompanyDay` rewritten as a single `INSERT … SELECT … ON CONFLICT DO UPDATE` so concurrent cron + live ingest can't race to lose tokens.
+- BLOCKER: CSV `/export/monthly.csv` rejects `from`/`to` query strings that aren't strict `YYYY-MM-DD`. Prevents header injection via crafted query string.
+- BLOCKER: CSV cells are RFC 4180-escaped; values containing comma / quote / CRLF are quoted with internal quotes doubled.
+- BLOCKER: FX rates from `open.er-api.com` are now bounded to `0.01..1000`. Outlier values are logged and skipped instead of persisted.
+- Archive cleanup now purges the per-company pricing config from `ctx.state` (alongside the currency state it already purged).
+- `isPricingConfig` rejects `margin.percent` that is NaN, negative, or above 500.
+- `rollup-daily` cron now re-rolls today AND yesterday on each tick. Catches midnight-boundary late events and recovers from partial-failure live ingests.
+- Per-event ingest log demoted from `info` to `debug`. Stops dumping per-event billing telemetry into the steady-state log stream.
+
 ## [1.0.0-rc.4] - 2026-06-20
 ### Changed
 - BREAKING: npm package renamed `claude-token-cost-reports` → `@herrhelms/claude-token-cost-reports` so installs match the user's npm scope. The in-app plugin key (`id` in manifest) and DB namespace stay as `claude-token-cost-reports` / `plugin_claude_token_cost_reports_c7ca204bbe` — only the npm name changed.
