@@ -1,6 +1,6 @@
 # Claude Token Cost Reports
 
-> A Paperclip plugin that turns flat-rate Claude subscription consumption into a token-priced client invoice.
+> A Paperclip plugin that turns Anthropic's Claude tokens or flat-rate subscription consumption into a token-priced client invoice.
 
 Track Claude token usage per Paperclip company, see who burned what across agents and models, and export a client-facing monthly invoice CSV in the currency you bill in. Daily FX snapshots, configurable margin, and a subscription divisor that reflects what the operator actually pays Anthropic.
 

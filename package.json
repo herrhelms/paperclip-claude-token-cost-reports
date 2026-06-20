@@ -1,5 +1,5 @@
 {
-  "name": "@herrhelms/claude-token-cost-reports",
+  "name": "claude-token-cost-reports",
   "version": "1.0.0-rc.4",
   "publishConfig": {
     "access": "public"
@@ -67,6 +67,7 @@
     "tokens",
     "usage",
     "billing",
+    "anthropic",
     "claude"
   ],
   "license": "MIT"
