@@ -99,6 +99,8 @@ The divisor comes from the Subscription preset in Settings:
 
 Switching modes never rewrites historical data — it's a render-time recompute. The dashboard's KPI labels and the per-agent table column headers update in place. The monthly CSV applies the divisor at row aggregation time so the exported invoice matches the dashboard total to the cent.
 
+> **Grain of salt on the ÷5 / ÷20 divisors.** Anthropic does not publish a per-token cost for Claude Pro or Claude Max subscriptions — what a subscription user actually "pays per token" is opaque, varies with monthly usage, and is not a straight discount on the API list price. The 5× and 20× constants here are pragmatic stand-ins, not a recovered Anthropic price formula. They're set so that an operator on a Pro or Max plan can fold a subscription account into the same billable model the rest of the system runs on — list price → divisor → margin → currency — and get a number that's defensible to a client without pretending it's an Anthropic-issued rate. If you have a contract or workload where the implicit per-token cost differs materially from list ÷ divisor, override the per-model rates in Settings and leave the preset at **Off**.
+
 ---
 
 ## Billing math
