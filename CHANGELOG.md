@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-20
+### Fixed
+- Worker bundle now includes `@paperclipai/plugin-sdk` instead of treating it as external. The 1.0.0 release relied on the SDK being in the worker's Node resolution chain, which holds in local dev but fails when paperclipai installs the plugin under `~/.paperclip/plugins/node_modules/@herrhelms/...` where the SDK is absent. Symptom: `ERR_MODULE_NOT_FOUND: Cannot find package '@paperclipai/plugin-sdk'` on first worker spawn after install from npm.
+- Manifest bundle (`dist/manifest.js`) follows the same pattern for the same reason.
+
 ## [1.0.0] - 2026-06-20
 
 First GA release on the npm registry. Fork point for the rc.1 → rc.4 line is recorded below; rc.5 was an internal staging tag that collapsed into this release after the pre-publish audit.

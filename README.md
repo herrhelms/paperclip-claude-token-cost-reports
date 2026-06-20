@@ -241,8 +241,6 @@ paperclipai plugin uninstall claude-token-cost-reports --force
 paperclipai plugin install -l .
 ```
 
-See [`docs/PRODUCTION-INSTALL-CHECKLIST.md`](docs/PRODUCTION-INSTALL-CHECKLIST.md) for a verification flow to run after the first install on a non-dev Paperclip host.
-
 ---
 
 ## License
