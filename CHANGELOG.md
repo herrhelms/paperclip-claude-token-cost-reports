@@ -6,9 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0-rc.5] - 2026-06-20
+## [1.0.0] - 2026-06-20
+
+First GA release on the npm registry. Fork point for the rc.1 → rc.4 line is recorded below; rc.5 was an internal staging tag that collapsed into this release after the pre-publish audit.
+
 ### Changed
-- npm package name set to `@herrhelms/claude-token-cost-reports` ahead of first publish to the npm registry. In-app plugin key (`claude-token-cost-reports`) and DB namespace unchanged.
+- npm package name set to `@herrhelms/claude-token-cost-reports` for the first publish to the npm registry. In-app plugin key (`claude-token-cost-reports`) and DB namespace unchanged.
 
 ### Fixed
 - BLOCKER: ingest + backfill now filter to `provider IN ('anthropic', 'claude')` so the plugin no longer slurps OpenAI events when installed alongside `@herrhelms/openai-token-cost-reports`.
