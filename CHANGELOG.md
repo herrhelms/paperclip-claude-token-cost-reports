@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-20
+### Changed
+- README: Install section now documents the install / uninstall slug asymmetry. The npm package is scoped (`@herrhelms/…`) but the in-app plugin key is not, so install uses `@herrhelms/claude-token-cost-reports` while uninstall uses `claude-token-cost-reports`. The host's `paperclipai plugin list` prints the unscoped key, but a single line in the README saves operators a head-scratch on first uninstall.
+
 ## [1.0.2] - 2026-06-20
 ### Changed
 - Settings page now surfaces a prominent caveat next to the subscription preset: the ÷5 / ÷20 divisors are pragmatic stand-ins, not Anthropic-published per-token rates. Same caveat that the README has carried since 1.0.0 — now visible where the operator actually chooses the preset.

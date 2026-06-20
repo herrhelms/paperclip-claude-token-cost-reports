@@ -14,10 +14,18 @@ paperclipai plugin install @herrhelms/claude-token-cost-reports
 
 # Verify the install
 paperclipai plugin list
-# expect: key=claude-token-cost-reports  status=ready  version=1.0.2  id=<uuid>
+# expect: key=claude-token-cost-reports  status=ready  version=1.0.3  id=<uuid>
 ```
 
 The host runs the plugin's database migrations automatically and registers the dashboard + settings page slots. No additional configuration is required to install — pricing and currency are set per-company in the Settings page after install.
+
+> The npm package is scoped (`@herrhelms/…`) but the in-app plugin key is not — that's a Paperclip-host convention. To uninstall, use the unscoped key:
+>
+> ```bash
+> paperclipai plugin uninstall claude-token-cost-reports
+> ```
+>
+> `paperclipai plugin list` prints the unscoped key next to each install, so you can always discover it from the host.
 
 ### Requirements
 
