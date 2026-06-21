@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-06-21
+### Fixed
+- Settings page rate table no longer empties out after the operator clicks "Revert to this" on a snapshot in the History panel. Root cause: `normalizePricing` in `src/ui/index.tsx` was unwrapping the worker's `getPricing` response one level too shallow. The response shape is `{ pricing: { pricing: {…rates…}, margin, … }, hasSnapshot }` — the unwrapper was iterating the OUTER object's keys (`pricing`, `margin`, `effective_input_rate_multiplier`) and ignoring all of them because none look like a `RateRow`. Now it correctly reaches `data.pricing.pricing` and rehydrates the rate rows on every reload, including post-revert.
+
+### Added
+- "Import Anthropic defaults" button next to the Add rate form. Merges the bundled `DEFAULT_SEED_PRICING` into the in-memory config: defaults fill in any rows the operator hasn't set, but any row the operator has customised wins. Operator clicks Save to persist as a new snapshot.
+
 ## [2.0.1] - 2026-06-20
 ### Fixed
 - Removed migration `005_drop_pricing_config.sql`. The Paperclip host rejects destructive DDL (DROP TABLE) under its Phase 1 plugin policy, so 2.0.0 installs failed at the migration step. The `pricing_config` table stays in the schema as harmless dead surface (declared in 001_init, never used at runtime since 0.7.0). The archive handler's DELETE-from-pricing_config was already removed in 2.0.0 — that stays gone; only the cleanup migration is reverted.

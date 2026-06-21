@@ -6,6 +6,7 @@ import {
   usePluginAction,
   usePluginToast,
 } from "@paperclipai/plugin-sdk/ui";
+import { DEFAULT_SEED_PRICING } from "../pricing";
 
 // Host paths for the two surfaces this plugin contributes.
 //
@@ -162,11 +163,18 @@ const EMPTY_PRICING: PricingConfig = {
 function normalizePricing(raw: unknown): PricingConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  // The worker's getPricing returns { pricing, hasSnapshot }. Unwrap if needed.
-  const source =
-    "pricing" in r && r.pricing && typeof r.pricing === "object"
-      ? r
-      : null;
+  // The worker's getPricing returns { pricing: PricingConfig, hasSnapshot }
+  // where PricingConfig itself has a `pricing` key holding the rate rows.
+  // If r.pricing looks like a wrapper (has its own pricing object), unwrap it.
+  // Otherwise treat r as the bare PricingConfig (defensive path for callers
+  // that already unwrap).
+  const inner = r.pricing as Record<string, unknown> | undefined;
+  const source: Record<string, unknown> | null =
+    inner && typeof inner === "object" && "pricing" in inner && typeof inner.pricing === "object"
+      ? inner
+      : inner && typeof inner === "object"
+        ? r
+        : null;
   if (!source) return null;
   const p = source.pricing as Record<string, unknown>;
   const out: PricingConfig = {
@@ -2470,6 +2478,23 @@ export function SettingsPage(): JSX.Element {
         />
         <button type="submit" style={styles.btn}>
           Add rate
+        </button>
+        <button
+          type="button"
+          style={styles.btn}
+          title="Merge Anthropic's published list-price defaults into the table. Operator-set rows are kept; missing rows are filled in. Click Save to persist."
+          onClick={() => {
+            setConfig((c) => ({
+              ...c,
+              pricing: {
+                // Defaults first, operator rows last so existing rates win.
+                ...DEFAULT_SEED_PRICING.pricing,
+                ...c.pricing,
+              },
+            }));
+          }}
+        >
+          Import Anthropic defaults
         </button>
       </form>
 
