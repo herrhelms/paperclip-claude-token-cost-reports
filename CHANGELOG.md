@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-06-21
+### Fixed
+- The "Effective input rate multiplier" input field would snap back to `1` on every keystroke that didn't already parse to a non-zero number. Root cause: `onChange={Number(e.target.value) || 1}` treated `0`, `NaN`, and `""` as "use the default" and rewrote local state to `1` before the operator could finish typing `0.05`. Switched to `defaultValue` + `onBlur` so the field is uncontrolled during typing and only commits when focus leaves. `key` forces a remount when the underlying snapshot changes (revert / reload). Values outside `(0, 1]` are visually reverted on blur instead of silently clamped, so the operator sees the rejection.
+
 ## [2.0.3] - 2026-06-21
 ### Fixed
 - Settings rate table now shows **"Loading pricing…"** while `getPricing` is in flight and **"No rate rows yet. Click Import Anthropic defaults below to seed the table."** when the response really is empty. Previously the table just rendered zero rows during these states, which looked indistinguishable from "saved data lost".

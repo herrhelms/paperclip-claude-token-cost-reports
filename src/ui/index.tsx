@@ -2641,19 +2641,36 @@ export function SettingsPage(): JSX.Element {
           >
             Effective input rate multiplier
           </label>
+          {/* Uncontrolled with defaultValue + onBlur so partial entries
+              like "0", "0.", "0.0" don't snap back to the default of 1
+              on every keystroke. Commits to state when the field loses
+              focus. The `key` forces a remount whenever the underlying
+              config changes (revert, reload) so the input always reflects
+              the saved value. Worker validates at save time. */}
           <input
             id="effective-input-rate-multiplier"
             type="number"
             step="0.01"
             min="0.01"
             max="1"
-            value={config.effective_input_rate_multiplier ?? 1}
-            onChange={(e) =>
+            defaultValue={config.effective_input_rate_multiplier ?? 1}
+            key={`mult-${config.effective_input_rate_multiplier ?? 1}`}
+            onBlur={(e) => {
+              const n = parseFloat(e.target.value);
+              const next =
+                Number.isFinite(n) && n > 0 && n <= 1
+                  ? n
+                  : (config.effective_input_rate_multiplier ?? 1);
+              if (Number.isFinite(n) && (n <= 0 || n > 1)) {
+                // Revert the field visually so the operator sees the
+                // rejection without a silent snap to 1.
+                e.target.value = String(next);
+              }
               setConfig((c) => ({
                 ...c,
-                effective_input_rate_multiplier: Number(e.target.value) || 1,
-              }))
-            }
+                effective_input_rate_multiplier: next,
+              }));
+            }}
             style={{ ...styles.input, width: 140 }}
           />
           <span style={styles.kpiSub}>
