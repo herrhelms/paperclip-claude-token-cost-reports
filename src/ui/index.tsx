@@ -160,6 +160,33 @@ const EMPTY_PRICING: PricingConfig = {
   effective_input_rate_multiplier: 1,
 };
 
+// Walk common error shapes to find the human-readable message. SDK
+// action errors arrive as plain objects ({ message, error, ... }), Error
+// instances have .message, plain strings are themselves, and as a last
+// resort we JSON.stringify so the operator at least sees the payload.
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    if (typeof e.message === "string") return e.message;
+    if (typeof e.error === "string") return e.error;
+    if (typeof e.body === "string") return e.body;
+    const data = e.data as Record<string, unknown> | undefined;
+    if (data && typeof data === "object") {
+      if (typeof data.message === "string") return data.message;
+      if (typeof data.error === "string") return data.error;
+    }
+    try {
+      const dump = JSON.stringify(err);
+      if (dump && dump !== "{}") return dump;
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(err);
+}
+
 // Locate the PricingConfig inside any wrapping the worker's getPricing
 // might apply. Walks at most two levels deep looking for an object that
 // has a `pricing` key whose value is itself an object of RateRow-shaped
@@ -2190,6 +2217,7 @@ export function SettingsPage(): JSX.Element {
 
   const [config, setConfig] = useState<PricingConfig>(EMPTY_PRICING);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [savingCurrency, setSavingCurrency] = useState(false);
   const [refreshingFx, setRefreshingFx] = useState(false);
 
@@ -2230,10 +2258,18 @@ export function SettingsPage(): JSX.Element {
     setSaving(true);
     try {
       await setPricing({ companyId, config: config as unknown as Record<string, unknown> });
+      setSaveError(null);
       toast?.({ title: "Pricing saved", tone: "success" });
       pricing.refresh();
     } catch (err) {
-      toast?.({ title: "Save failed", body: String(err), tone: "error" });
+      // Action errors from the SDK arrive as plain objects, not Error
+      // instances — String(err) would render as "[object Object]". Walk
+      // common shapes (Error.message, { message }, { error }, { body },
+      // nested .data.error) and fall back to a JSON dump so the operator
+      // sees the actual reason instead of "[object Object]".
+      const msg = extractErrorMessage(err);
+      setSaveError(msg);
+      toast?.({ title: "Save failed", body: msg, tone: "error" });
     } finally {
       setSaving(false);
     }
@@ -2732,6 +2768,24 @@ export function SettingsPage(): JSX.Element {
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
+
+      {saveError && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            borderLeft: "3px solid #ef4444",
+            background: "rgba(239, 68, 68, 0.08)",
+            borderRadius: 4,
+            fontSize: 13,
+            color: "var(--tu-fg)",
+            maxWidth: 720,
+            lineHeight: 1.5,
+          }}
+        >
+          <strong>Save failed.</strong> {saveError}
+        </div>
+      )}
 
       <HistoryPanel companyId={companyId} />
     </div>

@@ -12,6 +12,7 @@ import type { PricingConfig, PricingSnapshot } from "./pricing";
 export type { PricingConfig } from "./pricing";
 import {
   isValidPricingConfig,
+  validatePricingConfig,
   findActiveSnapshot,
   lookupRate as _lookupRate,
   DEFAULT_SEED_PRICING,
@@ -1898,11 +1899,12 @@ const plugin = definePlugin({
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
       const config = params.config as unknown;
-      if (!isValidPricingConfig(config)) {
-        throw new Error("config does not match the PricingConfig shape");
+      const validationError = validatePricingConfig(config);
+      if (validationError) {
+        throw new Error(`Invalid pricing config: ${validationError}`);
       }
       const now = new Date().toISOString();
-      await insertSnapshot(ctx, companyId, now, config, "via setPricing");
+      await insertSnapshot(ctx, companyId, now, config as PricingConfig, "via setPricing");
       ctx.logger.info("pricing snapshot appended", { companyId, effective_from: now });
       return { ok: true, effective_from: now };
     });
@@ -1918,11 +1920,12 @@ const plugin = definePlugin({
         throw new Error("effective_from must be an ISO 8601 UTC timestamp");
       }
       const config = params.config as unknown;
-      if (!isValidPricingConfig(config)) {
-        throw new Error("config does not match the PricingConfig shape");
+      const validationError = validatePricingConfig(config);
+      if (validationError) {
+        throw new Error(`Invalid pricing config: ${validationError}`);
       }
       const note = params.note ? String(params.note) : null;
-      await insertSnapshot(ctx, companyId, effectiveFrom, config, note);
+      await insertSnapshot(ctx, companyId, effectiveFrom, config as PricingConfig, note);
       ctx.logger.info("pricing snapshot appended", { companyId, effective_from: effectiveFrom, note });
       return { ok: true, effective_from: effectiveFrom };
     });

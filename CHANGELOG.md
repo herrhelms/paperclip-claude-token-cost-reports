@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-06-21
+### Fixed
+- Save-failed toast no longer reads `[object Object]`. Two-sided fix:
+  - **Worker:** `setPricing` and `addPricingSnapshot` now throw the precise validation failure via the new `validatePricingConfig()` helper. Example: `"Invalid pricing config: row 'claude-opus-4-8': output must be >= 0 (got -5)"` instead of the generic `"config does not match the PricingConfig shape"`.
+  - **UI:** Settings save handler now extracts the error message from common SDK error shapes (`Error.message`, `{ message }`, `{ error }`, `{ body }`, nested `.data.error`) instead of calling `String(err)` on a plain object. Falls back to JSON-stringified payload as a last resort so the operator at least sees the wire shape.
+- Settings page now renders an inline amber/red error banner directly under the Save button when the last save attempt failed, in addition to the toast. Stays visible until the next successful save.
+
+### Added
+- `validatePricingConfig(v): string | null` in `src/pricing.ts` — verbose validator that returns the first error encountered with field-level detail, or null when the config is valid. Exported alongside the existing boolean `isValidPricingConfig`.
+
 ## [2.0.4] - 2026-06-21
 ### Fixed
 - The "Effective input rate multiplier" input field would snap back to `1` on every keystroke that didn't already parse to a non-zero number. Root cause: `onChange={Number(e.target.value) || 1}` treated `0`, `NaN`, and `""` as "use the default" and rewrote local state to `1` before the operator could finish typing `0.05`. Switched to `defaultValue` + `onBlur` so the field is uncontrolled during typing and only commits when focus leaves. `key` forces a remount when the underlying snapshot changes (revert / reload). Values outside `(0, 1]` are visually reverted on blur instead of silently clamped, so the operator sees the rejection.

@@ -27,6 +27,65 @@ export interface PricingSnapshot {
   note?: string | null;
 }
 
+// Verbose validator: returns the first error encountered as a human-
+// readable string, or null when the config is valid. The worker uses
+// this to throw precise errors for setPricing; isValidPricingConfig
+// below is the type-guard wrapper for places that just need a boolean.
+export function validatePricingConfig(v: unknown): string | null {
+  if (!v || typeof v !== "object") {
+    return "config must be an object";
+  }
+  const c = v as Record<string, unknown>;
+  const p = c.pricing as Record<string, unknown> | undefined;
+  if (!p || typeof p !== "object") {
+    return "config.pricing must be an object (the rate-row table)";
+  }
+  for (const [key, row] of Object.entries(p)) {
+    if (typeof key !== "string" || key.length === 0) {
+      return `row key must be a non-empty string (got ${JSON.stringify(key)})`;
+    }
+    if (!row || typeof row !== "object") {
+      return `row '${key}': value must be an object with input + output rates`;
+    }
+    const r = row as Record<string, unknown>;
+    if (typeof r.input !== "number" || !Number.isFinite(r.input)) {
+      return `row '${key}': input must be a finite number (got ${JSON.stringify(r.input)})`;
+    }
+    if (r.input < 0) {
+      return `row '${key}': input must be >= 0 (got ${r.input})`;
+    }
+    if (typeof r.output !== "number" || !Number.isFinite(r.output)) {
+      return `row '${key}': output must be a finite number (got ${JSON.stringify(r.output)})`;
+    }
+    if (r.output < 0) {
+      return `row '${key}': output must be >= 0 (got ${r.output})`;
+    }
+    if (r.display_name !== undefined && typeof r.display_name !== "string") {
+      return `row '${key}': display_name must be a string when present`;
+    }
+  }
+  const margin = c.margin as Record<string, unknown> | undefined;
+  if (!margin) {
+    return "margin object is required (e.g. { percent: 5 })";
+  }
+  if (typeof margin.percent !== "number" || !Number.isFinite(margin.percent)) {
+    return `margin.percent must be a finite number (got ${JSON.stringify(margin.percent)})`;
+  }
+  if (margin.percent < 0 || margin.percent > 500) {
+    return `margin.percent must be in [0, 500] (got ${margin.percent})`;
+  }
+  const mult = c.effective_input_rate_multiplier;
+  if (mult !== undefined) {
+    if (typeof mult !== "number" || !Number.isFinite(mult)) {
+      return `effective_input_rate_multiplier must be a finite number when present (got ${JSON.stringify(mult)})`;
+    }
+    if (mult <= 0 || mult > 1) {
+      return `effective_input_rate_multiplier must be in (0, 1] (got ${mult})`;
+    }
+  }
+  return null;
+}
+
 // Free-form validator. No fixed key set — every row that exists is
 // checked for { input: finite number >= 0, output: finite number >= 0,
 // optional display_name: string }. Margin must be finite in [0, 500].
