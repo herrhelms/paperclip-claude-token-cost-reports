@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-06-21
+### Fixed
+- Settings rate table now shows **"Loading pricing…"** while `getPricing` is in flight and **"No rate rows yet. Click Import Anthropic defaults below to seed the table."** when the response really is empty. Previously the table just rendered zero rows during these states, which looked indistinguishable from "saved data lost".
+- `normalizePricing` is more defensive. Walks two levels of nesting (handles `{ pricing: PricingConfig }`, `{ data: { pricing: PricingConfig } }`, and bare `PricingConfig`) and picks whichever candidate has rate-shaped rows (`{ input: number, output: number }` entries). Emits a `console.warn` when no candidate matches so DevTools surfaces what the server actually returned.
+
 ## [2.0.2] - 2026-06-21
 ### Fixed
 - Settings page rate table no longer empties out after the operator clicks "Revert to this" on a snapshot in the History panel. Root cause: `normalizePricing` in `src/ui/index.tsx` was unwrapping the worker's `getPricing` response one level too shallow. The response shape is `{ pricing: { pricing: {…rates…}, margin, … }, hasSnapshot }` — the unwrapper was iterating the OUTER object's keys (`pricing`, `margin`, `effective_input_rate_multiplier`) and ignoring all of them because none look like a `RateRow`. Now it correctly reaches `data.pricing.pricing` and rehydrates the rate rows on every reload, including post-revert.

@@ -160,22 +160,53 @@ const EMPTY_PRICING: PricingConfig = {
   effective_input_rate_multiplier: 1,
 };
 
-function normalizePricing(raw: unknown): PricingConfig | null {
+// Locate the PricingConfig inside any wrapping the worker's getPricing
+// might apply. Walks at most two levels deep looking for an object that
+// has a `pricing` key whose value is itself an object of RateRow-shaped
+// entries. This is intentionally permissive: the worker has wrapped
+// the response differently across releases (bare PricingConfig in 1.x,
+// { pricing, hasSnapshot } wrapper in 2.0.0+), and the SDK's hook may or
+// may not strip the outer `data` envelope.
+function locatePricingConfig(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object") return null;
-  const r = raw as Record<string, unknown>;
-  // The worker's getPricing returns { pricing: PricingConfig, hasSnapshot }
-  // where PricingConfig itself has a `pricing` key holding the rate rows.
-  // If r.pricing looks like a wrapper (has its own pricing object), unwrap it.
-  // Otherwise treat r as the bare PricingConfig (defensive path for callers
-  // that already unwrap).
-  const inner = r.pricing as Record<string, unknown> | undefined;
-  const source: Record<string, unknown> | null =
-    inner && typeof inner === "object" && "pricing" in inner && typeof inner.pricing === "object"
-      ? inner
-      : inner && typeof inner === "object"
-        ? r
-        : null;
-  if (!source) return null;
+  const candidates: Array<Record<string, unknown>> = [];
+  candidates.push(raw as Record<string, unknown>);
+  for (const c of [...candidates]) {
+    if (c.pricing && typeof c.pricing === "object") {
+      candidates.push(c.pricing as Record<string, unknown>);
+    }
+    if (c.data && typeof c.data === "object") {
+      candidates.push(c.data as Record<string, unknown>);
+    }
+  }
+  for (const c of candidates) {
+    const p = c.pricing;
+    if (!p || typeof p !== "object") continue;
+    // Heuristic: at least one entry of p looks like a RateRow.
+    for (const v of Object.values(p as Record<string, unknown>)) {
+      if (v && typeof v === "object") {
+        const r = v as Record<string, unknown>;
+        if (typeof r.input === "number" && typeof r.output === "number") {
+          return c;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function normalizePricing(raw: unknown): PricingConfig | null {
+  const source = locatePricingConfig(raw);
+  if (!source) {
+    if (raw !== null && raw !== undefined) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[claude-token-cost-reports] normalizePricing could not find a rate table in getPricing response",
+        raw,
+      );
+    }
+    return null;
+  }
   const p = source.pricing as Record<string, unknown>;
   const out: PricingConfig = {
     pricing: {},
@@ -2326,6 +2357,19 @@ export function SettingsPage(): JSX.Element {
           </tr>
         </thead>
         <tbody>
+          {pricing.loading && sortedRows.length === 0 ? (
+            <tr>
+              <td style={styles.td} colSpan={5}>
+                Loading pricing…
+              </td>
+            </tr>
+          ) : sortedRows.length === 0 ? (
+            <tr>
+              <td style={styles.td} colSpan={5}>
+                No rate rows yet. Click <strong>Import Anthropic defaults</strong> below to seed the table.
+              </td>
+            </tr>
+          ) : null}
           {sortedRows.map(([key, row]) => (
             <tr key={key}>
               <td style={styles.td}>
