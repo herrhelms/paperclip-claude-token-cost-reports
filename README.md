@@ -14,7 +14,7 @@ paperclipai plugin install @herrhelms/claude-token-cost-reports
 
 # Verify the install
 paperclipai plugin list
-# expect: key=claude-token-cost-reports  status=ready  version=2.0.5  id=<uuid>
+# expect: key=claude-token-cost-reports  status=ready  version=2.1.1  id=<uuid>
 ```
 
 The host runs the plugin's database migrations automatically and registers the dashboard + settings page slots. No additional configuration is required to install — pricing and currency are set per-company in the Settings page after install.
@@ -39,7 +39,7 @@ The host runs the plugin's database migrations automatically and registers the d
 | Surface | Where to find it | What's there |
 | --- | --- | --- |
 | Dashboard | `/$COMPANY_HANDLE/monthly-report-claude` (in the company sidebar) | Usage KPIs, per-model bars, per-agent table, daily chart, monthly CSV export |
-| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Free-form pricing matrix (Add / Edit / Delete rows), margin, billing currency, FX-rate status, snapshot history timeline, optional subscription multiplier |
+| Settings | `/$COMPANY_HANDLE/company/settings/instance/plugins/<install-uuid>` | Free-form pricing matrix (Add / Edit / Delete rows), margin, billing currency, FX-rate status, current pricing snapshot + Clear-all button, optional subscription multiplier |
 
 The `<install-uuid>` is printed by `paperclipai plugin list` after install.
 
@@ -68,9 +68,9 @@ Then open `/$COMPANY_HANDLE/monthly-report-claude` — the dashboard reflects th
 
 ### Dashboard at `/$COMPANY/monthly-report-claude`
 
-- 6 KPI cards: total tokens, input, output, list (pre-margin), net (subscription-adjusted), price (chargeback). The List + Net labels surface only when a subscription preset is active.
-- Per-model horizontal bar chart, native-currency cost and price.
-- Per-agent table with totals + per-model breakdown (Runs / Input / Output / Cost / Price).
+- 6 KPI cards: total tokens, input, output, **List price** (raw Anthropic, tokens × per-1M rate), **Your cost** (List × multiplier), **Client price** (Your cost × (1 + margin)). Sub-labels surface the effective multiplier and margin from the period totals — when the period spans snapshots with different settings the label shows an "(mixed)" suffix.
+- Per-model horizontal bar chart, native-currency: List → Your cost → Client price.
+- Per-agent table with totals + per-model breakdown (Runs / Input / Output / List / Your cost / Client price).
 - Daily volume column chart — input + output stacked, peak label.
 - Status chips for ingest health and FX staleness next to the page title.
 
@@ -90,16 +90,15 @@ The dashboard inherits the host's Paperclip theme (light/dark, shadcn-style card
 For each event with model `m`, input tokens `i`, output tokens `o`:
 
 ```text
-list_cost     = (i × pricing[m].input + o × pricing[m].output) / 1_000_000     # USD
-client_price  = list_cost × (1 + margin.percent / 100)                          # USD
+list          = (i × pricing[m].input + o × pricing[m].output) / 1_000_000     # USD, raw Anthropic
+your_cost     = list × effective_input_rate_multiplier                          # USD, after subscription discount
+client_price  = your_cost × (1 + margin.percent / 100)                          # USD, after operator margin
 row.price     = client_price × fx_rate(month_end_day, currency)                 # Native currency
 ```
 
-When subscription mode is active, `list_cost` is divided by the preset's divisor (5 for Pro, 20 for Max) before margin is applied. See the next section for the reasoning and a hard caveat.
+The dashboard surfaces all three tiers explicitly. **List price** is what an API user would pay at Anthropic list. **Your cost** is what the operator effectively owes (subscription-adjusted). **Client price** is what the customer is billed (after operator margin). Per-model and per-agent cards show the same three numbers per row so reconciliation is explicit.
 
-KPI **Cost** on the dashboard is `list_cost` in the billing currency (what an API user would pay at list price). KPI **Price** is `row.price` (what the client owes after margin and currency conversion). The per-model and per-agent cards show both side by side, so reconciliation is explicit.
-
-The monthly CSV emits only `row.price` — operator-internal numbers (list cost, divisor, margin %) stay off the file you send to the client.
+The monthly CSV emits only `row.price` — operator-internal numbers (list, multiplier, margin) stay off the file you send to the client.
 
 ---
 
@@ -122,9 +121,14 @@ matches their effective per-token cost:
 | Claude Max | 0.05 | ÷20 of list — matches the 1.x Max preset |
 | Custom | any value in (0, 1] | Operator-specific contract |
 
-The multiplier applies to the input rate only. Output stays at list.
-Switching multipliers creates a new snapshot, so historical periods are
-unaffected.
+The multiplier scales the entire list price (input + output) — it represents
+the subscription discount on the whole bundle, not just one direction.
+
+Saving pricing in Settings **replaces** the active snapshot and reprices every
+event in this company — past and future — so changing the multiplier is
+reflected across the full report immediately. To preserve period-by-period
+historical overrides, append snapshots explicitly via the `addPricingSnapshot`
+action (advanced).
 
 ---
 
@@ -182,18 +186,20 @@ Core-read tables (declared in manifest): `cost_events` — used by the backfill 
 
 ### Data handlers (registered on `ctx.data`, called from UI via `usePluginData`)
 
-- `getDailyUsage({ companyId, from, to })` — daily rows with cost/price in USD and native currency. Drives the dashboard daily chart + KPIs.
-- `getMonthlySummary({ companyId, from, to })` — calendar-month rollups (legacy aggregate, kept for the API surface).
-- `getPerModelForRange({ companyId, from, to })` — per-model breakdown with cost → price in native currency.
-- `getPerAgentBreakdown({ companyId, from, to })` — per-agent + per-model with runs, tokens, cost, price.
+- `getDailyUsage({ companyId, from, to })` — daily rows with list / your cost / client price in USD and native currency. Drives the dashboard daily chart + KPIs.
+- `getPerModelForRange({ companyId, from, to })` — per-model breakdown with List → Your cost → Client price in native currency. Money fields are null (not 0) for models with no rate row in the active config; UI uses that to render the "no rate set" chip.
+- `getPerAgentBreakdown({ companyId, from, to })` — per-agent + per-model with runs, tokens, list, your cost, client price. Same null-for-no-rate convention as above. Also surfaces the latest snapshot's `effectiveInputRateMultiplier` for the dashboard's BillingConfigStrip.
 - `getPricing({ companyId })` — bare PricingConfig.
+- `listPricingHistory({ companyId })` — the active snapshot (post-setPricing this is normally one row).
 - `getCurrencyConfig({ companyId })` — `{ currency, supported }`.
 - `getFxStatus({ companyId })` — current rate, day, source for the company's currency.
 - `getIngestStats({ companyId })` — total + 24h ingest counts for the dashboard health chip.
 
 ### Actions (registered on `ctx.actions`, called from UI via `usePluginAction`)
 
-- `setPricing({ companyId, config })`
+- `setPricing({ companyId, config })` — atomically **replaces** all snapshots with a single epoch-effective one; reprices every event in this company. The DELETE + INSERT runs in one CTE statement so the company is never observed mid-wipe by concurrent readers or live ingest.
+- `addPricingSnapshot({ companyId, effective_from, config, note? })` — advanced: append a historical override (e.g. "from 2026-04-01 onward, mult was X"). Erased on the next `setPricing` call.
+- `clearAllPricing({ companyId })` — wipe every snapshot; report drops to "—" until next `setPricing`.
 - `setCurrencyConfig({ companyId, currency })` (best-effort prefetches FX)
 - `refreshFxNow({ companyId })`
 - `backfillFromCostEvents({ companyId, from, to })`

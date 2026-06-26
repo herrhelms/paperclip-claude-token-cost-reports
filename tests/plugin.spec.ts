@@ -5,6 +5,7 @@ import {
   isIsoDate,
   csvCell,
   priceFor,
+  priceTiers,
   slugifyForFilename,
   SUPPORTED_PROVIDERS,
 } from "../src/worker";
@@ -112,14 +113,86 @@ describe("priceFor (free-form)", () => {
     expect(outputCost).toBeCloseTo(25, 8);  // 1M × $25 = $25
   });
 
-  it("applies effective_input_rate_multiplier to input only (Pro/Max subscription analog)", () => {
+  it("ignores effective_input_rate_multiplier — priceFor returns raw list", () => {
+    // 2.1.x: priceFor returns Anthropic list pricing (tokens × rate). Callers
+    // apply the multiplier themselves as part of the three-tier rollup
+    // (list → your cost → client price), so this primitive must NOT
+    // pre-multiply input.
     const withMult: PricingConfig = {
       ...cfg,
-      effective_input_rate_multiplier: 0.2, // ÷5
+      effective_input_rate_multiplier: 0.2, // ÷5 — should have no effect here
     };
     const { inputCost, outputCost } = priceFor("claude-opus-4-6[1m]", 2_000_000, 1_000_000, withMult);
-    expect(inputCost).toBeCloseTo(2, 8);   // 10 × 0.2
-    expect(outputCost).toBeCloseTo(25, 8); // unchanged
+    expect(inputCost).toBeCloseTo(10, 8);  // raw list — multiplier ignored
+    expect(outputCost).toBeCloseTo(25, 8);
+  });
+});
+
+// ---- Three-tier rollup (the canonical helper) -----------------------------
+
+describe("priceTiers", () => {
+  const baseCfg: PricingConfig = {
+    pricing: {
+      "claude-opus-4-6[1m]": { input: 5, output: 25 },
+    },
+    margin: { percent: 0 },
+  };
+
+  it("flags hasRate=false and emits zeros when the model has no rate row", () => {
+    const t = priceTiers("claude-opus-4-7[1m]", 1_000_000, 1_000_000, baseCfg);
+    expect(t.hasRate).toBe(false);
+    expect(t.list).toBe(0);
+    expect(t.cost).toBe(0);
+    expect(t.price).toBe(0);
+  });
+
+  it("collapses to list = cost = price when multiplier is 1 and margin is 0", () => {
+    const t = priceTiers("claude-opus-4-6[1m]", 2_000_000, 1_000_000, baseCfg);
+    expect(t.hasRate).toBe(true);
+    expect(t.list).toBeCloseTo(35, 8); // 2×$5 + 1×$25 = $35
+    expect(t.cost).toBeCloseTo(35, 8);
+    expect(t.price).toBeCloseTo(35, 8);
+  });
+
+  it("scales cost by multiplier on the whole list, then margin on top", () => {
+    const cfg: PricingConfig = {
+      ...baseCfg,
+      margin: { percent: 15 },
+      effective_input_rate_multiplier: 0.05, // Claude Max
+    };
+    const t = priceTiers("claude-opus-4-6[1m]", 2_000_000, 1_000_000, cfg);
+    // list = $35; cost = 35 × 0.05 = $1.75; price = 1.75 × 1.15 = $2.0125
+    expect(t.list).toBeCloseTo(35, 8);
+    expect(t.cost).toBeCloseTo(1.75, 8);
+    expect(t.price).toBeCloseTo(2.0125, 8);
+  });
+
+  it("treats missing effective_input_rate_multiplier as 1.0", () => {
+    const t = priceTiers("claude-opus-4-6[1m]", 2_000_000, 0, baseCfg);
+    expect(t.cost).toBeCloseTo(t.list, 8); // mult defaults to 1 → cost == list
+  });
+
+  it("treats negative-mass tokens as zero through the rate lookup (no panic)", () => {
+    // Defensive: a negative token count would imply data corruption; the
+    // function should still return finite numbers rather than NaN.
+    const t = priceTiers("claude-opus-4-6[1m]", -1, -1, baseCfg);
+    expect(Number.isFinite(t.list)).toBe(true);
+    expect(Number.isFinite(t.cost)).toBe(true);
+    expect(Number.isFinite(t.price)).toBe(true);
+  });
+
+  it("maintains list ≤ cost ≤ price ordering for any valid mult in (0,1] + margin ≥ 0", () => {
+    // mult ≤ 1 means cost ≤ list (cost is post-discount). margin ≥ 0 means
+    // price ≥ cost. So the ordering is list ≥ cost ≤ price — the "Your cost"
+    // KPI is always between or equal to List and Client price.
+    const cfg: PricingConfig = {
+      ...baseCfg,
+      margin: { percent: 20 },
+      effective_input_rate_multiplier: 0.5,
+    };
+    const t = priceTiers("claude-opus-4-6[1m]", 3_000_000, 1_000_000, cfg);
+    expect(t.list).toBeGreaterThanOrEqual(t.cost);
+    expect(t.price).toBeGreaterThanOrEqual(t.cost);
   });
 });
 

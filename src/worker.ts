@@ -144,6 +144,54 @@ async function insertSnapshot(
   );
 }
 
+// "Replace all snapshots with one" — used by setPricing. The host's
+// ctx.db.execute only accepts bare INSERT / UPDATE / DELETE (no CTEs, no
+// multi-statement), so we can't fold this into a single atomic call. We
+// do INSERT first, then DELETE everything else for the company, in that
+// order so the failure modes are non-destructive:
+//
+//   - INSERT fails             → company unchanged, operator sees error.
+//   - INSERT ok, DELETE fails  → company has the new snapshot AND any old
+//                                snapshots. The resolver walks DESC by
+//                                effective_from — any old snapshot whose
+//                                effective_from > epoch still shadows the
+//                                new epoch row for events after its date
+//                                (acts as a historical override). Not clean,
+//                                but never "snapshot-less / unpriced."
+//   - Both ok                  → clean state with only the epoch row.
+async function replaceSnapshotsWith(
+  ctx: PluginContext,
+  companyId: string,
+  effectiveFrom: string,
+  config: PricingConfig,
+  note: string | null,
+): Promise<void> {
+  await insertSnapshot(ctx, companyId, effectiveFrom, config, note);
+  await ctx.db.execute(
+    `DELETE FROM ${q(ctx, "pricing_config_history")}
+      WHERE company_id = $1
+        AND effective_from <> $2::timestamptz`,
+    [companyId, effectiveFrom],
+  );
+}
+
+// Wipe every snapshot for a company. Shared by setPricing's "replace all"
+// path (via replaceSnapshotsWith above) and the clearAllPricing action.
+// Returns the number of rows deleted so callers can echo it back to the
+// operator.
+async function wipeSnapshots(
+  ctx: PluginContext,
+  companyId: string,
+): Promise<number> {
+  const result = await ctx.db.execute(
+    `DELETE FROM ${q(ctx, "pricing_config_history")} WHERE company_id = $1`,
+    [companyId],
+  );
+  return typeof (result as { rowCount?: number }).rowCount === "number"
+    ? (result as { rowCount: number }).rowCount
+    : 0;
+}
+
 // Exported so Task 4's per-event cost-computation handler can resolve the
 // active pricing for a given occurred_at timestamp.
 export async function loadActiveConfig(
@@ -513,17 +561,52 @@ export function priceFor(
   output: number,
   cfg: PricingConfig,
 ): { inputCost: number; outputCost: number } {
-  // Wrap as a snapshot so lookupRate (from ./pricing) works without
-  // forking the signature for non-snapshot callers.
+  // Returns raw Anthropic list pricing — tokens × per-1M rate, no
+  // multiplier, no margin. Kept on the public API for back-compat with
+  // tests and any external callers; new handler code should use
+  // priceTiers which returns the full list/cost/price rollup plus a
+  // hasRate signal.
   const rate = lookupRate(
     { effective_from: "", config: cfg },
     rawModel,
   );
   if (!rate) return { inputCost: 0, outputCost: 0 };
-  const mult = cfg.effective_input_rate_multiplier ?? 1;
-  const inputCost = (input / 1_000_000) * rate.input * mult;
+  const inputCost = (input / 1_000_000) * rate.input;
   const outputCost = (output / 1_000_000) * rate.output;
   return { inputCost, outputCost };
+}
+
+/**
+ * The single source of truth for the three-tier rollup. Previously these
+ * four lines were hand-written at five handler sites — `priceTokens`,
+ * `buildClientMonthlyCsv`, `getDailyUsage`, `getPerModelForRange`,
+ * `getPerAgentBreakdown` — which invited drift bugs any time the formula
+ * changed.
+ *
+ *   list  = tokens × per-1M Anthropic rate         (raw Anthropic, no knobs)
+ *   cost  = list × effective_input_rate_multiplier (post-subscription)
+ *   price = cost × (1 + margin/100)                (post-operator-margin)
+ *
+ * `hasRate` is true iff cfg.pricing has a row for `rawModel`. Handlers use
+ * it to surface the "no rate set" chip for the model — emitting null money
+ * fields instead of zeroes so the UI can distinguish "no rate row" from
+ * "rate row exists but tokens were zero."
+ */
+export function priceTiers(
+  rawModel: string,
+  input: number,
+  output: number,
+  cfg: PricingConfig,
+): { list: number; cost: number; price: number; hasRate: boolean } {
+  const rate = lookupRate({ effective_from: "", config: cfg }, rawModel);
+  if (!rate) {
+    return { list: 0, cost: 0, price: 0, hasRate: false };
+  }
+  const list = (input / 1_000_000) * rate.input + (output / 1_000_000) * rate.output;
+  const mult = cfg.effective_input_rate_multiplier ?? 1;
+  const cost = list * mult;
+  const price = cost * (1 + (cfg.margin.percent || 0) / 100);
+  return { list, cost, price, hasRate: true };
 }
 
 async function rollupCompanyDay(ctx: PluginContext, companyId: string, day: string): Promise<void> {
@@ -790,89 +873,6 @@ async function ingestEvent(ctx: PluginContext, event: PluginEvent): Promise<void
   await rollupCompanyDay(ctx, companyId, toDay(occurredAt));
 }
 
-function buildMonthlyRows(
-  daily: DailyRow[],
-  snapshots: ReadonlyArray<PricingSnapshot>,
-): Array<{
-  month: string;
-  month_start: string;
-  month_end: string;
-  input_tokens: number;
-  output_tokens: number;
-  input_cost_usd: number | null;
-  output_cost_usd: number | null;
-  total_billed_usd: number | null;
-}> {
-  const hasPricing = snapshots.length > 0;
-  const buckets = new Map<
-    string,
-    {
-      month: string;
-      month_start: string;
-      month_end: string;
-      input_tokens: number;
-      output_tokens: number;
-      input_cost_usd: number;
-      output_cost_usd: number;
-      // Margin-weighted billed total (each row's cost × its snapshot's margin).
-      // Lets the monthly summary respect snapshots that span different margin %s.
-      billed_accum_usd: number;
-    }
-  >();
-
-  for (const row of daily) {
-    const start = monthStart(new Date(row.day + "T00:00:00Z"));
-    const key = monthKey(start);
-    let bucket = buckets.get(key);
-    if (!bucket) {
-      bucket = {
-        month: key,
-        month_start: fmtDay(start),
-        month_end: fmtDay(monthEnd(start)),
-        input_tokens: 0,
-        output_tokens: 0,
-        input_cost_usd: 0,
-        output_cost_usd: 0,
-        billed_accum_usd: 0,
-      };
-      buckets.set(key, bucket);
-    }
-    bucket.input_tokens += Number(row.input_tokens) || 0;
-    bucket.output_tokens += Number(row.output_tokens) || 0;
-    if (hasPricing) {
-      const snap = findActiveSnapshot(snapshots, `${row.day}T12:00:00Z`);
-      const cfg = snap?.config ?? null;
-      if (cfg) {
-        const { inputCost, outputCost } = priceFor(
-          row.model,
-          Number(row.input_tokens) || 0,
-          Number(row.output_tokens) || 0,
-          cfg,
-        );
-        bucket.input_cost_usd += inputCost;
-        bucket.output_cost_usd += outputCost;
-        const marginMult = 1 + (cfg.margin.percent || 0) / 100;
-        bucket.billed_accum_usd += (inputCost + outputCost) * marginMult;
-      }
-    }
-  }
-
-  return Array.from(buckets.values())
-    .sort((a, b) => a.month.localeCompare(b.month))
-    .map((b) => ({
-      month: b.month,
-      month_start: b.month_start,
-      month_end: b.month_end,
-      input_tokens: b.input_tokens,
-      output_tokens: b.output_tokens,
-      input_cost_usd: hasPricing ? Number(b.input_cost_usd.toFixed(4)) : null,
-      output_cost_usd: hasPricing ? Number(b.output_cost_usd.toFixed(4)) : null,
-      total_billed_usd: hasPricing
-        ? Number(b.billed_accum_usd.toFixed(4))
-        : null,
-    }));
-}
-
 async function readDaily(
   ctx: PluginContext,
   companyId: string,
@@ -961,12 +961,8 @@ async function buildClientMonthlyCsv(
       const snap = findActiveSnapshot(snapshots, `${row.day}T12:00:00Z`);
       const cfg = snap?.config ?? null;
       if (cfg) {
-        const { inputCost, outputCost } = priceFor(row.model, inp, out, cfg);
-        // priceFor already applies effective_input_rate_multiplier (the 1.x
-        // subscriptionDivisor replacement). Margin goes on top here so it's
-        // contemporary with this row's snapshot.
-        const marginMult = 1 + (cfg.margin.percent || 0) / 100;
-        bucket.billed_usd += (inputCost + outputCost) * marginMult;
+        const { price } = priceTiers(row.model, inp, out, cfg);
+        bucket.billed_usd += price;
       }
     }
   }
@@ -1195,10 +1191,8 @@ function priceTokens(
   cfg: PricingConfig | null,
 ): number | null {
   if (!cfg) return null;
-  const { inputCost, outputCost } = priceFor(rawModel, input, output, cfg);
-  const total = inputCost + outputCost;
-  const marginMultiplier = 1 + (cfg.margin.percent || 0) / 100;
-  return Number((total * marginMultiplier).toFixed(4));
+  const { price } = priceTiers(rawModel, input, output, cfg);
+  return Number(price.toFixed(4));
 }
 
 async function buildCostsOverview(
@@ -1631,14 +1625,16 @@ const plugin = definePlugin({
       const fxRate = fx?.rate ?? 1;
       const rows = await readDaily(ctx, companyId, from, to);
 
-      // cost_usd is post-multiplier raw (priceFor applies the
-      // effective_input_rate_multiplier); price_usd applies margin on top.
-      // Both accumulate per-row because each day's row resolves its own
-      // snapshot, and snapshots can carry different margins / multipliers.
+      // Three tiers: list = raw Anthropic price (no knobs);
+      //              cost = list × effective_input_rate_multiplier;
+      //              price = cost × (1 + margin/100).
+      // All three accumulate per-row because each day's row resolves its
+      // own snapshot, and snapshots can carry different multipliers / margins.
       const byDay = new Map<string, {
         day: string;
         input_tokens: number;
         output_tokens: number;
+        list_usd: number;
         cost_usd: number;
         price_usd: number;
       }>();
@@ -1650,6 +1646,7 @@ const plugin = definePlugin({
             day: r.day,
             input_tokens: 0,
             output_tokens: 0,
+            list_usd: 0,
             cost_usd: 0,
             price_usd: 0,
           };
@@ -1661,15 +1658,14 @@ const plugin = definePlugin({
         bucket.output_tokens += out;
         if (hasPricing) {
           // Resolve snapshot at midday — operators with sub-day precision
-          // needs add a snapshot with the exact effective_from they want.
+          // need to add a snapshot with the exact effective_from they want.
           const snap = findActiveSnapshot(snapshots, `${r.day}T12:00:00Z`);
           const cfg = snap?.config ?? null;
           if (cfg) {
-            const { inputCost, outputCost } = priceFor(r.model, inp, out, cfg);
-            const rowCost = inputCost + outputCost;
-            const marginMult = 1 + (cfg.margin.percent || 0) / 100;
-            bucket.cost_usd += rowCost;
-            bucket.price_usd += rowCost * marginMult;
+            const { list, cost, price } = priceTiers(r.model, inp, out, cfg);
+            bucket.list_usd += list;
+            bucket.cost_usd += cost;
+            bucket.price_usd += price;
           }
         }
       }
@@ -1689,44 +1685,27 @@ const plugin = definePlugin({
         rows: Array.from(byDay.values())
           .sort((a, b) => b.day.localeCompare(a.day))
           .map((r) => {
+            const list_usd = hasPricing ? r.list_usd : null;
             const cost_usd = hasPricing ? r.cost_usd : null;
             const price_usd = hasPricing ? r.price_usd : null;
-            const cost_native =
-              cost_usd === null ? null : cost_usd * fxRate;
-            const price_native =
-              price_usd === null ? null : price_usd * fxRate;
             return {
               day: r.day,
               input_tokens: r.input_tokens,
               output_tokens: r.output_tokens,
+              list_usd:
+                list_usd === null ? null : Number(list_usd.toFixed(4)),
               cost_usd:
                 cost_usd === null ? null : Number(cost_usd.toFixed(4)),
               price_usd:
                 price_usd === null ? null : Number(price_usd.toFixed(4)),
+              list_native:
+                list_usd === null ? null : Number((list_usd * fxRate).toFixed(4)),
               cost_native:
-                cost_native === null ? null : Number(cost_native.toFixed(4)),
+                cost_usd === null ? null : Number((cost_usd * fxRate).toFixed(4)),
               price_native:
-                price_native === null
-                  ? null
-                  : Number(price_native.toFixed(4)),
-              // Back-compat alias the dashboard's KPI uses.
-              billable_usd:
-                price_usd === null ? null : Number(price_usd.toFixed(4)),
+                price_usd === null ? null : Number((price_usd * fxRate).toFixed(4)),
             };
           }),
-      };
-    });
-
-    ctx.data.register("getMonthlySummary", async (params) => {
-      const companyId = String(params.companyId ?? "");
-      const from = String(params.from ?? "");
-      const to = String(params.to ?? "");
-      if (!companyId || !from || !to) throw new Error("companyId, from, to are required");
-      const snapshots = await loadAllSnapshots(ctx, companyId);
-      const daily = await readDaily(ctx, companyId, from, to);
-      return {
-        priced: snapshots.length > 0,
-        rows: buildMonthlyRows(daily, snapshots),
       };
     });
 
@@ -1746,22 +1725,28 @@ const plugin = definePlugin({
       const fxRate = fx?.rate ?? 1;
       const daily = await readDaily(ctx, companyId, from, to);
 
-      const byModel = new Map<
-        string,
-        {
-          input_tokens: number;
-          output_tokens: number;
-          cost_usd: number;
-          price_usd: number;
-        }
-      >();
-
+      type ModelBucket = {
+        input_tokens: number;
+        output_tokens: number;
+        list_usd: number;
+        cost_usd: number;
+        price_usd: number;
+        hasRate: boolean;
+      };
+      const byModel = new Map<string, ModelBucket>();
       for (const r of daily) {
         const inp = Number(r.input_tokens) || 0;
         const out = Number(r.output_tokens) || 0;
         let bucket = byModel.get(r.model);
         if (!bucket) {
-          bucket = { input_tokens: 0, output_tokens: 0, cost_usd: 0, price_usd: 0 };
+          bucket = {
+            input_tokens: 0,
+            output_tokens: 0,
+            list_usd: 0,
+            cost_usd: 0,
+            price_usd: 0,
+            hasRate: false,
+          };
           byModel.set(r.model, bucket);
         }
         bucket.input_tokens += inp;
@@ -1770,38 +1755,40 @@ const plugin = definePlugin({
           const snap = findActiveSnapshot(snapshots, `${r.day}T12:00:00Z`);
           const cfg = snap?.config ?? null;
           if (cfg) {
-            const { inputCost, outputCost } = priceFor(r.model, inp, out, cfg);
-            const rowCost = inputCost + outputCost;
-            const marginMult = 1 + (cfg.margin.percent || 0) / 100;
-            bucket.cost_usd += rowCost;
-            bucket.price_usd += rowCost * marginMult;
+            const tiers = priceTiers(r.model, inp, out, cfg);
+            if (tiers.hasRate) {
+              bucket.list_usd += tiers.list;
+              bucket.cost_usd += tiers.cost;
+              bucket.price_usd += tiers.price;
+              bucket.hasRate = true;
+            }
           }
         }
       }
 
+      // Money fields are null when the model has NO rate row in the active
+      // pricing config — distinct from "rate exists but tokens were zero".
+      // The UI uses this null to render the "no rate set / add rate →" chip.
       const rows = Array.from(byModel.entries())
         .map(([model, b]) => {
-          const cost_usd = hasPricing ? b.cost_usd : null;
-          const price_usd = hasPricing ? b.price_usd : null;
-          const cost_native = cost_usd === null ? null : cost_usd * fxRate;
-          const price_native =
-            price_usd === null ? null : price_usd * fxRate;
+          const priced = hasPricing && b.hasRate;
+          const list_usd = priced ? Number(b.list_usd.toFixed(4)) : null;
+          const cost_usd = priced ? Number(b.cost_usd.toFixed(4)) : null;
+          const price_usd = priced ? Number(b.price_usd.toFixed(4)) : null;
           return {
             model,
             input_tokens: b.input_tokens,
             output_tokens: b.output_tokens,
             total_tokens: b.input_tokens + b.output_tokens,
-            cost_usd: cost_usd === null ? null : Number(cost_usd.toFixed(4)),
-            price_usd:
-              price_usd === null ? null : Number(price_usd.toFixed(4)),
+            list_usd,
+            cost_usd,
+            price_usd,
+            list_native:
+              list_usd === null ? null : Number((list_usd * fxRate).toFixed(4)),
             cost_native:
-              cost_native === null ? null : Number(cost_native.toFixed(4)),
+              cost_usd === null ? null : Number((cost_usd * fxRate).toFixed(4)),
             price_native:
-              price_native === null ? null : Number(price_native.toFixed(4)),
-            // Back-compat alias for the previous shape; existing UI code that
-            // reads billable_usd keeps working until callers migrate.
-            billable_usd:
-              price_usd === null ? null : Number(price_usd.toFixed(4)),
+              price_usd === null ? null : Number((price_usd * fxRate).toFixed(4)),
           };
         })
         .filter((r) => r.total_tokens > 0)
@@ -1891,10 +1878,15 @@ const plugin = definePlugin({
       return { snapshots };
     });
 
-    // setPricing keeps its 1.x signature: { companyId, config }. Internally
-    // it appends a snapshot with effective_from = now() so historical rows
-    // are preserved. Operators can still call addPricingSnapshot directly
-    // to backdate a snapshot.
+    // setPricing means "set my current pricing for every event in this
+    // company." It atomically replaces all prior snapshots with a single
+    // epoch-effective one so the new multiplier / margin / rates apply
+    // retroactively. This matches the Settings UI promise — "multiplier
+    // 0.05 = 5% of list" — which the previous append-with-effective_from=now
+    // semantics broke for historical days. The DELETE + INSERT runs in a
+    // single CTE statement so the company is never observed mid-wipe by
+    // concurrent readers or live ingest. Operators who want true period-by-
+    // period overrides still use addPricingSnapshot directly.
     ctx.actions.register("setPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
@@ -1903,10 +1895,16 @@ const plugin = definePlugin({
       if (validationError) {
         throw new Error(`Invalid pricing config: ${validationError}`);
       }
-      const now = new Date().toISOString();
-      await insertSnapshot(ctx, companyId, now, config as PricingConfig, "via setPricing");
-      ctx.logger.info("pricing snapshot appended", { companyId, effective_from: now });
-      return { ok: true, effective_from: now };
+      const epoch = "1970-01-01T00:00:00.000Z";
+      await replaceSnapshotsWith(
+        ctx,
+        companyId,
+        epoch,
+        config as PricingConfig,
+        "via setPricing",
+      );
+      ctx.logger.info("pricing snapshot replaced", { companyId, effective_from: epoch });
+      return { ok: true, effective_from: epoch };
     });
 
     // Explicit snapshot append with operator-chosen effective_from + note.
@@ -1930,34 +1928,17 @@ const plugin = definePlugin({
       return { ok: true, effective_from: effectiveFrom };
     });
 
-    // Append a NEW snapshot whose config is a copy of an existing one.
-    // The operator picks a historical effective_from, and a new snapshot
-    // with effective_from=now() and the same config is created.
-    ctx.actions.register("revertToPricingSnapshot", async (params) => {
+    // Wipe every pricing snapshot for a company. Leaves the company in the
+    // "unpriced" state: all cost / client-price columns drop to "—" until
+    // the operator saves new pricing. Useful for cleaning up a heterogeneous
+    // history (mixed margins / multipliers from earlier saves) before
+    // re-establishing a clean baseline with setPricing.
+    ctx.actions.register("clearAllPricing", async (params) => {
       const companyId = String(params.companyId ?? "");
       if (!companyId) throw new Error("companyId is required");
-      const sourceFrom = String(params.source_effective_from ?? "");
-      if (!sourceFrom) throw new Error("source_effective_from is required");
-      const [src] = await ctx.db.query<{ config_json: PricingConfig }>(
-        `SELECT config_json FROM ${q(ctx, "pricing_config_history")}
-          WHERE company_id = $1 AND effective_from = $2::timestamptz`,
-        [companyId, sourceFrom],
-      );
-      if (!src) throw new Error(`no snapshot found at effective_from=${sourceFrom}`);
-      const now = new Date().toISOString();
-      await insertSnapshot(
-        ctx,
-        companyId,
-        now,
-        src.config_json,
-        `revert to ${sourceFrom}`,
-      );
-      ctx.logger.info("pricing snapshot reverted", {
-        companyId,
-        source_effective_from: sourceFrom,
-        new_effective_from: now,
-      });
-      return { ok: true, effective_from: now, source_effective_from: sourceFrom };
+      const deleted = await wipeSnapshots(ctx, companyId);
+      ctx.logger.info("pricing snapshots cleared", { companyId, deleted });
+      return { ok: true, deleted };
     });
 
     // ---- Currency + FX ---------------------------------------------------
@@ -2096,8 +2077,10 @@ const plugin = definePlugin({
         runs: number;
         input_tokens: number;
         output_tokens: number;
+        list_usd: number | null;
         cost_usd: number | null;
         price_usd: number | null;
+        list_native: number | null;
         cost_native: number | null;
         price_native: number | null;
       };
@@ -2110,6 +2093,7 @@ const plugin = definePlugin({
           runs: number;
           input_tokens: number;
           output_tokens: number;
+          list_usd: number;
           cost_usd: number;
           price_usd: number;
           hasCost: boolean;
@@ -2118,6 +2102,7 @@ const plugin = definePlugin({
           runs: number;
           input_tokens: number;
           output_tokens: number;
+          list_usd: number;
           cost_usd: number;
           price_usd: number;
           hasCost: boolean;
@@ -2130,8 +2115,7 @@ const plugin = definePlugin({
         const inp = Number(r.input_tokens) || 0;
         const out = Number(r.output_tokens) || 0;
         const runs = Number(r.runs) || 0;
-        // Resolve this day's snapshot. priceFor applies the multiplier;
-        // margin goes on top here so it tracks the row's contemporary snapshot.
+        let rowList = 0;
         let rowCost = 0;
         let rowPrice = 0;
         let rowHasCost = false;
@@ -2139,11 +2123,13 @@ const plugin = definePlugin({
           const snap = findActiveSnapshot(snapshots, `${r.day}T12:00:00Z`);
           const cfg = snap?.config ?? null;
           if (cfg) {
-            const { inputCost, outputCost } = priceFor(r.model, inp, out, cfg);
-            rowCost = inputCost + outputCost;
-            const marginMult = 1 + (cfg.margin.percent || 0) / 100;
-            rowPrice = rowCost * marginMult;
-            rowHasCost = true;
+            const tiers = priceTiers(r.model, inp, out, cfg);
+            if (tiers.hasRate) {
+              rowList = tiers.list;
+              rowCost = tiers.cost;
+              rowPrice = tiers.price;
+              rowHasCost = true;
+            }
           }
         }
 
@@ -2161,6 +2147,7 @@ const plugin = definePlugin({
               runs: 0,
               input_tokens: 0,
               output_tokens: 0,
+              list_usd: 0,
               cost_usd: 0,
               price_usd: 0,
               hasCost: false,
@@ -2175,6 +2162,7 @@ const plugin = definePlugin({
             runs: 0,
             input_tokens: 0,
             output_tokens: 0,
+            list_usd: 0,
             cost_usd: 0,
             price_usd: 0,
             hasCost: false,
@@ -2185,6 +2173,7 @@ const plugin = definePlugin({
         modelBucket.input_tokens += inp;
         modelBucket.output_tokens += out;
         if (rowHasCost) {
+          modelBucket.list_usd += rowList;
           modelBucket.cost_usd += rowCost;
           modelBucket.price_usd += rowPrice;
           modelBucket.hasCost = true;
@@ -2193,6 +2182,7 @@ const plugin = definePlugin({
         block.totals.input_tokens += inp;
         block.totals.output_tokens += out;
         if (rowHasCost) {
+          block.totals.list_usd += rowList;
           block.totals.cost_usd += rowCost;
           block.totals.price_usd += rowPrice;
           block.totals.hasCost = true;
@@ -2203,8 +2193,10 @@ const plugin = definePlugin({
       const result = Array.from(byAgent.values()).map((block) => {
         const models: ModelLine[] = Array.from(block.modelMap.values())
           .map((m) => {
+            const list_usd = m.hasCost ? m.list_usd : null;
             const cost_usd = m.hasCost ? m.cost_usd : null;
             const price_usd = m.hasCost ? m.price_usd : null;
+            const list_native = list_usd === null ? null : list_usd * fxRate;
             const cost_native = cost_usd === null ? null : cost_usd * fxRate;
             const price_native = price_usd === null ? null : price_usd * fxRate;
             return {
@@ -2212,8 +2204,11 @@ const plugin = definePlugin({
               runs: m.runs,
               input_tokens: m.input_tokens,
               output_tokens: m.output_tokens,
+              list_usd: list_usd === null ? null : Number(list_usd.toFixed(4)),
               cost_usd: cost_usd === null ? null : Number(cost_usd.toFixed(4)),
               price_usd: price_usd === null ? null : Number(price_usd.toFixed(4)),
+              list_native:
+                list_native === null ? null : Number(list_native.toFixed(4)),
               cost_native:
                 cost_native === null ? null : Number(cost_native.toFixed(4)),
               price_native:
@@ -2226,8 +2221,11 @@ const plugin = definePlugin({
               (a.input_tokens + a.output_tokens),
           );
         const tHasCost = block.totals.hasCost;
+        const totalsListUsd = tHasCost ? block.totals.list_usd : null;
         const totalsCostUsd = tHasCost ? block.totals.cost_usd : null;
         const totalsPriceUsd = tHasCost ? block.totals.price_usd : null;
+        const totalsListNative =
+          totalsListUsd === null ? null : totalsListUsd * fxRate;
         const totalsCostNative =
           totalsCostUsd === null ? null : totalsCostUsd * fxRate;
         const totalsPriceNative =
@@ -2240,10 +2238,16 @@ const plugin = definePlugin({
             runs: block.totals.runs,
             input_tokens: block.totals.input_tokens,
             output_tokens: block.totals.output_tokens,
+            list_usd:
+              totalsListUsd === null ? null : Number(totalsListUsd.toFixed(4)),
             cost_usd:
               totalsCostUsd === null ? null : Number(totalsCostUsd.toFixed(4)),
             price_usd:
               totalsPriceUsd === null ? null : Number(totalsPriceUsd.toFixed(4)),
+            list_native:
+              totalsListNative === null
+                ? null
+                : Number(totalsListNative.toFixed(4)),
             cost_native:
               totalsCostNative === null
                 ? null
@@ -2268,6 +2272,11 @@ const plugin = definePlugin({
         fxDay: fx?.day ?? null,
         fxSource: fx?.source ?? null,
         marginPercent: latestCfg?.margin.percent ?? 0,
+        // Per-agent is the canonical surface for "what's the live config?".
+        // Day / per-model handlers don't surface it — the BillingConfigStrip
+        // and KPI sub-labels in the UI source it from this response.
+        effectiveInputRateMultiplier:
+          latestCfg?.effective_input_rate_multiplier ?? 1,
         rows: result,
       };
     });
